@@ -3,8 +3,8 @@ FROM alpine:3.24 AS builder
 WORKDIR /src
 COPY . .
 
-RUN apk add --no-cache bash git patch
-RUN patch -p1 < patches/fallback-health-fields.patch
+RUN apk add --no-cache bash git python3
+RUN python3 scripts/apply_custom_fallback_patch.py
 RUN bash scripts/build.alpine.release.sh
 
 FROM alpine:3.24
