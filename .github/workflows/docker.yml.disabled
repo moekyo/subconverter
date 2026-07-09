@@ -1,0 +1,2 @@
+# Disabled upstream workflow.
+# The fork uses .github/workflows/custom-docker.yml for manual GHCR image builds.
