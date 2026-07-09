@@ -1,13 +1,13 @@
-FROM alpine:3.20 AS builder
+FROM alpine:3.24 AS builder
 
 WORKDIR /src
 COPY . .
 
-RUN apk add --no-cache bash git patch \
-    && patch -p1 < patches/fallback-health-fields.patch \
-    && bash scripts/build.alpine.release.sh
+RUN apk add --no-cache bash git patch
+RUN patch -p1 < patches/fallback-health-fields.patch
+RUN bash scripts/build.alpine.release.sh
 
-FROM alpine:3.20
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates tzdata
 
