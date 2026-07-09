@@ -1,16 +1,19 @@
 name: Custom Docker Image
 
 on:
+  push:
+    branches:
+      - master
+    paths:
+      - Dockerfile.custom
+      - patches/fallback-health-fields.patch
+      - src/config/proxygroup.h
+      - src/config/binding.h
+      - src/generator/config/subexport.cpp
+      - scripts/build.alpine.release.sh
+      - .github/workflows/custom-docker.yml
   workflow_dispatch:
     inputs:
-      platform:
-        description: Docker platform to build for the target NAS
-        required: true
-        default: linux/amd64
-        type: choice
-        options:
-          - linux/amd64
-          - linux/arm64
       tag:
         description: Image tag to publish
         required: true
@@ -41,25 +44,20 @@ jobs:
         id: settings
         shell: bash
         run: |
-          PLATFORM="${{ github.event.inputs.platform }}"
           TAG="${{ github.event.inputs.tag }}"
 
-          if [ -z "$PLATFORM" ]; then
-            PLATFORM="linux/amd64"
-          fi
           if [ -z "$TAG" ]; then
             TAG="custom"
           fi
 
-          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Build and push linux/amd64 image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.custom
-          platforms: ${{ steps.settings.outputs.platform }}
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:${{ steps.settings.outputs.tag }}
