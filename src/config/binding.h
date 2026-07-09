@@ -55,6 +55,9 @@ namespace toml
                 conf.Type = ProxyGroupType::Fallback;
                 conf.Url = find<String>(v, "url");
                 conf.Interval = find<Integer>(v, "interval");
+                conf.Tolerance = find_or<Integer>(v, "tolerance", 0);
+                if(v.contains("lazy"))
+                    conf.Lazy = find_or<bool>(v, "lazy", false);
                 if(v.contains("evaluate-before-use"))
                     conf.EvaluateBeforeUse = find_or(v, "evaluate-before-use", conf.EvaluateBeforeUse.get());
                 break;
@@ -77,7 +80,15 @@ namespace toml
             default:
                 throw serialization_error(format_error("Proxy Group has unsupported type!", v.at("type").location(), "should be one of following: select, url-test, load-balance, fallback, relay, ssid"), v.at("type").location());
             }
-            conf.Timeout = find_or(v, "timeout", 5);
+            conf.Timeout = find_or(v, "timeout", 0);
+            conf.MaxFailedTimes = find_or<Integer>(v, "max-failed-times", 0);
+            if(v.contains("expected-status"))
+            {
+                if(v.at("expected-status").is_integer())
+                    conf.ExpectedStatus = std::to_string(find<Integer>(v, "expected-status"));
+                else
+                    conf.ExpectedStatus = find<String>(v, "expected-status");
+            }
             conf.Proxies = find_or<StrArray>(v, "rule", {});
             conf.UsingProvider = find_or<StrArray>(v, "use", {});
             if(conf.Proxies.empty() && conf.UsingProvider.empty())

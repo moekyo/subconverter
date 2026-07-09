@@ -30,11 +30,13 @@ struct ProxyGroupConfig
     Integer Interval = 0;
     Integer Timeout = 0;
     Integer Tolerance = 0;
+    Integer MaxFailedTimes = 0;
     BalanceStrategy Strategy = BalanceStrategy::ConsistentHashing;
     Boolean Lazy;
     Boolean DisableUdp;
     Boolean Persistent;
     Boolean EvaluateBeforeUse;
+    String ExpectedStatus;
 
     String TypeStr() const
     {

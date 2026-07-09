@@ -6,7 +6,6 @@ on:
       - master
     paths:
       - Dockerfile.custom
-      - scripts/apply_custom_fallback_patch.py
       - src/config/proxygroup.h
       - src/config/binding.h
       - src/generator/config/subexport.cpp

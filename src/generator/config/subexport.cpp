@@ -624,15 +624,23 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         case ProxyGroupType::Smart:
             [[fallthrough]];
         case ProxyGroupType::URLTest:
-            if(!x.Lazy.is_undef())
-                singlegroup["lazy"] = x.Lazy.get();
             [[fallthrough]];
         case ProxyGroupType::Fallback:
+            if(!x.Lazy.is_undef())
+                singlegroup["lazy"] = x.Lazy.get();
             singlegroup["url"] = x.Url;
             if(x.Interval > 0)
                 singlegroup["interval"] = x.Interval;
             if(x.Tolerance > 0)
                 singlegroup["tolerance"] = x.Tolerance;
+            if(x.Timeout > 0)
+                singlegroup["timeout"] = x.Timeout;
+            if(x.MaxFailedTimes > 0)
+                singlegroup["max-failed-times"] = x.MaxFailedTimes;
+            if(!x.ExpectedStatus.empty())
+                singlegroup["expected-status"] = x.ExpectedStatus;
+            if(!x.EvaluateBeforeUse.is_undef())
+                singlegroup["evaluate-before-use"] = x.EvaluateBeforeUse.get();
             break;
         default:
             continue;

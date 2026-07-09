@@ -1,10 +1,10 @@
 # Custom subconverter build
 
-This fork adds a small build-time patch for personal Mihomo fallback usage while leaving the upstream source files unchanged in the repository.
+This fork directly adds fallback health-check field support in the source code for Mihomo usage — no build-time patching.
 
-## What this build changes
+## What this build adds
 
-`patches/fallback-health-fields.patch` extends `custom_groups` TOML handling for `type = "fallback"` so these fields are parsed and emitted into the generated Clash/Mihomo YAML:
+`custom_groups` TOML handling for `type = "fallback"` parses and emits these fields into the generated Clash/Mihomo YAML:
 
 ```toml
 [[custom_groups]]
@@ -19,7 +19,7 @@ max-failed-times = 3
 expected-status = 204
 ```
 
-Supported added/normalized fields:
+Supported fields:
 
 - `lazy`
 - `timeout`
@@ -28,7 +28,7 @@ Supported added/normalized fields:
 - `expected-status`
 - `evaluate-before-use`
 
-`expected-status` can be written either as a TOML integer (`204`) or as a TOML string (`"204"`).
+`expected-status` can be a TOML integer (`204`) or a TOML string (`"204"`).
 
 ## Build locally
 
@@ -41,11 +41,6 @@ curl http://127.0.0.1:25500/version
 ## Build with GitHub Actions
 
 Run **Actions → Custom Docker Image → Run workflow**.
-
-Choose one platform:
-
-- `linux/amd64` for common Intel/AMD NAS
-- `linux/arm64` for ARM NAS
 
 The workflow publishes:
 
