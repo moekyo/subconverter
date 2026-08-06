@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -32,6 +34,38 @@ RWLock cache_rw_lock;
 
 //std::string user_agent_str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36";
 static auto user_agent_str = "subconverter/" VERSION " cURL/" LIBCURL_VERSION;
+static constexpr const char *strip_fingerprint_marker = "#subconverter_strip_fingerprint=1";
+
+static bool stripFingerprintMarker(std::string &url)
+{
+    if(!endsWith(url, strip_fingerprint_marker))
+        return false;
+    url.erase(url.size() - std::char_traits<char>::length(strip_fingerprint_marker));
+    return true;
+}
+
+static bool shouldDropForwardedHeader(const std::string &name)
+{
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch)
+    {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    return lower == "host"
+        || lower == "connection"
+        || lower == "keep-alive"
+        || lower == "proxy-connection"
+        || lower == "proxy-authenticate"
+        || lower == "proxy-authorization"
+        || lower == "te"
+        || lower == "trailer"
+        || lower == "transfer-encoding"
+        || lower == "upgrade"
+        || lower == "content-length"
+        || lower == "subconverter-request"
+        || lower == "subconverter-version";
+}
 
 struct curl_progress_data
 {
@@ -147,6 +181,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
 {
     CURL *curl_handle;
     std::string *data = result.content, new_url = argument.url;
+    const bool strip_fingerprint = stripFingerprintMarker(new_url);
     curl_slist *header_list = nullptr;
     defer(curl_slist_free_all(header_list);)
     long retVal;
@@ -158,8 +193,9 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     {
         if(startsWith(argument.proxy, "cors:"))
         {
-            header_list = curl_slist_append(header_list, "X-Requested-With: subconverter " VERSION);
-            new_url = argument.proxy.substr(5) + argument.url;
+            if(!strip_fingerprint)
+                header_list = curl_slist_append(header_list, "X-Requested-With: subconverter " VERSION);
+            new_url = argument.proxy.substr(5) + new_url;
         }
         else
             curl_easy_setopt(curl_handle, CURLOPT_PROXY, argument.proxy.data());
@@ -167,19 +203,25 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     curl_progress_data limit;
     limit.size_limit = global.maxAllowedDownloadSize;
     curl_set_common_options(curl_handle, new_url.data(), &limit);
-    header_list = curl_slist_append(header_list, "Content-Type: application/json;charset=utf-8");
+    if(!strip_fingerprint)
+        header_list = curl_slist_append(header_list, "Content-Type: application/json;charset=utf-8");
     if(argument.request_headers)
     {
         for(auto &x : *argument.request_headers)
         {
+            if(strip_fingerprint && shouldDropForwardedHeader(x.first))
+                continue;
             auto header = x.first + ": " + x.second;
             header_list = curl_slist_append(header_list, header.data());
         }
-        if(!argument.request_headers->contains("User-Agent"))
+        if(!strip_fingerprint && !argument.request_headers->contains("User-Agent"))
             curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, user_agent_str);
     }
-    header_list = curl_slist_append(header_list, "SubConverter-Request: 1");
-    header_list = curl_slist_append(header_list, "SubConverter-Version: " VERSION);
+    if(!strip_fingerprint)
+    {
+        header_list = curl_slist_append(header_list, "SubConverter-Request: 1");
+        header_list = curl_slist_append(header_list, "SubConverter-Version: " VERSION);
+    }
     if(header_list)
         curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, header_list);
 
