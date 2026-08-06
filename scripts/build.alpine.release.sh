@@ -47,8 +47,12 @@ rm subconverter
 # shellcheck disable=SC2046
 g++ -o base/subconverter $(find CMakeFiles/subconverter.dir/src/ -name "*.o")  -static -lpcre2-8 -lyaml-cpp -L/usr/lib64 -lcurl -lmbedtls -lmbedcrypto -lmbedx509 -lz -lbrotlidec -lbrotlicommon -lzstd -l:quickjs/libquickjs.a -llibcron -O3 -s
 
-pip install --break-system-packages gitpython
-python3 scripts/update_rules.py -c scripts/rules_config.conf
+if [ "${SKIP_RULE_UPDATE:-0}" = "1" ]; then
+    echo "Skipping bundled rule refresh (SKIP_RULE_UPDATE=1)."
+else
+    pip install --break-system-packages gitpython
+    python3 scripts/update_rules.py -c scripts/rules_config.conf
+fi
 
 cd base
 chmod +rx subconverter
