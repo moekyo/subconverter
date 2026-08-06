@@ -39,10 +39,11 @@ run_quiet() {
         printf '[subconverter-build] done: %s (%ss)\n' "$label" "$((finished - started))"
         rm -f "$logfile"
         return 0
+    else
+        status=$?
+        show_failure "$label" "$status" "$logfile"
+        return "$status"
     fi
-    status=$?
-    show_failure "$label" "$status" "$logfile"
-    return "$status"
 }
 
 run_with_heartbeat() {
@@ -51,19 +52,22 @@ run_with_heartbeat() {
     local logfile
     local started
     local now
+    local next_heartbeat
     local pid
     local status
     logfile="$(log_path "$label")"
     started="$(date +%s)"
+    next_heartbeat=$((started + HEARTBEAT_SECONDS))
     step "$label"
 
     "$@" >"$logfile" 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
-        sleep "$HEARTBEAT_SECONDS"
-        if kill -0 "$pid" 2>/dev/null; then
-            now="$(date +%s)"
+        sleep 1
+        now="$(date +%s)"
+        if [ "$now" -ge "$next_heartbeat" ] && kill -0 "$pid" 2>/dev/null; then
             printf '[subconverter-build] working: %s (%ss elapsed)\n' "$label" "$((now - started))"
+            next_heartbeat=$((now + HEARTBEAT_SECONDS))
         fi
     done
 
@@ -72,10 +76,11 @@ run_with_heartbeat() {
         printf '[subconverter-build] done: %s (%ss)\n' "$label" "$((now - started))"
         rm -f "$logfile"
         return 0
+    else
+        status=$?
+        show_failure "$label" "$status" "$logfile"
+        return "$status"
     fi
-    status=$?
-    show_failure "$label" "$status" "$logfile"
-    return "$status"
 }
 
 run_quiet "Install build toolchain" \
@@ -84,7 +89,7 @@ run_quiet "Install static build dependencies" \
     apk add --no-cache mbedtls-dev mbedtls-static zlib-dev zlib-static rapidjson-dev pcre2-dev pcre2-static brotli-dev brotli-static zstd-dev zstd-static libpsl-dev libpsl-static
 
 run_quiet "Fetch curl 8.21.0" \
-    git -c advice.detachedHead=false clone --quiet https://github.com/curl/curl --depth=1 --branch curl-8_21_0
+    git -c advice.detachedHead=false clone --quiet --depth=1 --branch curl-8_21_0 https://github.com/curl/curl
 pushd curl >/dev/null
 run_quiet "Configure curl" \
     cmake -DCURL_USE_MBEDTLS=ON -DHTTP_ONLY=ON -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=OFF -DCURL_USE_LIBSSH2=OFF -DBUILD_CURL_EXE=OFF -DCURL_ZSTD=ON -DCURL_BROTLI=ON -DUSE_NGHTTP2=OFF -DUSE_LIBIDN2=OFF -DCURL_USE_LIBPSL=OFF .
@@ -92,7 +97,7 @@ run_with_heartbeat "Build curl" make install -j2
 popd >/dev/null
 
 run_quiet "Fetch yaml-cpp" \
-    git clone --quiet https://github.com/jbeder/yaml-cpp --depth=1
+    git clone --quiet --depth=1 https://github.com/jbeder/yaml-cpp
 pushd yaml-cpp >/dev/null
 run_quiet "Configure yaml-cpp" \
     cmake -DCMAKE_BUILD_TYPE=Release -DYAML_CPP_BUILD_TESTS=OFF -DYAML_CPP_BUILD_TOOLS=OFF .
@@ -100,7 +105,7 @@ run_with_heartbeat "Build yaml-cpp" make install -j3
 popd >/dev/null
 
 run_quiet "Fetch QuickJS++" \
-    git clone --quiet https://github.com/ftk/quickjspp --depth=1
+    git clone --quiet --depth=1 https://github.com/ftk/quickjspp
 pushd quickjspp >/dev/null
 run_quiet "Configure QuickJS++" cmake -DCMAKE_BUILD_TYPE=Release .
 run_with_heartbeat "Build QuickJS" make quickjs -j3
@@ -112,7 +117,7 @@ run_quiet "Install QuickJS++ header" install -m644 quickjspp.hpp /usr/include/
 popd >/dev/null
 
 run_quiet "Fetch libcron" \
-    git clone --quiet https://github.com/PerMalmberg/libcron --depth=1
+    git clone --quiet --depth=1 https://github.com/PerMalmberg/libcron
 pushd libcron >/dev/null
 run_quiet "Fetch libcron submodules" git submodule update --init --quiet
 run_quiet "Configure libcron" cmake -DCMAKE_BUILD_TYPE=Release .
@@ -120,7 +125,7 @@ run_with_heartbeat "Build libcron" make libcron install -j3
 popd >/dev/null
 
 run_quiet "Fetch toml11 v4.4.0" \
-    git -c advice.detachedHead=false clone --quiet https://github.com/ToruNiina/toml11 --branch=v4.4.0 --depth=1
+    git -c advice.detachedHead=false clone --quiet --depth=1 --branch v4.4.0 https://github.com/ToruNiina/toml11
 pushd toml11 >/dev/null
 run_quiet "Configure toml11" cmake -DCMAKE_CXX_STANDARD=11 .
 run_with_heartbeat "Install toml11" make install -j4
