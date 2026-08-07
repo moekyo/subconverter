@@ -97,6 +97,13 @@ require_positive_integer() {
     fi
 }
 
+validate_runtime_controls() {
+    require_positive_integer BUILD_HEARTBEAT_SECONDS "$HEARTBEAT_SECONDS"
+    require_positive_integer BUILD_NETWORK_RETRIES "$NETWORK_RETRIES"
+    require_positive_integer BUILD_NETWORK_RETRY_DELAY_SECONDS "$NETWORK_RETRY_DELAY_SECONDS"
+    require_positive_integer BUILD_NETWORK_ATTEMPT_TIMEOUT_SECONDS "$NETWORK_ATTEMPT_TIMEOUT_SECONDS"
+}
+
 run_network_with_retry() {
     local label="$1"
     shift
@@ -124,23 +131,38 @@ clone_repo() {
     local label="$1"
     local destination="$2"
     shift 2
+    local attempt=1
 
     mkdir -p "$(dirname "$destination")"
-    rm -rf "$destination"
-    run_network_with_retry \
-        "$label" \
-        git \
-        -c http.version=HTTP/1.1 \
-        -c http.lowSpeedLimit=1024 \
-        -c http.lowSpeedTime=60 \
-        clone "$@" "$destination"
+    while [ "$attempt" -le "$NETWORK_RETRIES" ]; do
+        # A failed clone can leave both a working directory and partial nested
+        # submodule state. Recreating the destination on every attempt keeps a
+        # retry independent from the previous transport failure.
+        rm -rf "$destination"
+        if run_with_heartbeat \
+            "$label (attempt $attempt/$NETWORK_RETRIES)" \
+            timeout "$NETWORK_ATTEMPT_TIMEOUT_SECONDS" \
+            git \
+            -c http.version=HTTP/1.1 \
+            -c http.lowSpeedLimit=1024 \
+            -c http.lowSpeedTime=60 \
+            clone "$@" "$destination"; then
+            return 0
+        fi
+        if [ "$attempt" -ge "$NETWORK_RETRIES" ]; then
+            printf '[subconverter-build] network clone exhausted %s attempts: %s\n' \
+                "$NETWORK_RETRIES" "$label" >&2
+            return 1
+        fi
+        printf '[subconverter-build] retrying clean clone: %s in %ss\n' \
+            "$label" "$NETWORK_RETRY_DELAY_SECONDS" >&2
+        sleep "$NETWORK_RETRY_DELAY_SECONDS"
+        attempt=$((attempt + 1))
+    done
 }
 
 build_dependencies() {
-    require_positive_integer BUILD_HEARTBEAT_SECONDS "$HEARTBEAT_SECONDS"
-    require_positive_integer BUILD_NETWORK_RETRIES "$NETWORK_RETRIES"
-    require_positive_integer BUILD_NETWORK_RETRY_DELAY_SECONDS "$NETWORK_RETRY_DELAY_SECONDS"
-    require_positive_integer BUILD_NETWORK_ATTEMPT_TIMEOUT_SECONDS "$NETWORK_ATTEMPT_TIMEOUT_SECONDS"
+    validate_runtime_controls
 
     rm -rf "$DEPS_ROOT"
     mkdir -p "$DEPS_ROOT"
@@ -213,7 +235,7 @@ build_dependencies() {
 }
 
 build_project() {
-    require_positive_integer BUILD_HEARTBEAT_SECONDS "$HEARTBEAT_SECONDS"
+    validate_runtime_controls
 
     export PKG_CONFIG_PATH=/usr/lib64/pkgconfig
     run_quiet "Configure subconverter" cmake -DCMAKE_BUILD_TYPE=Release .
