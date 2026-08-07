@@ -2,6 +2,7 @@
 
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
+#include "utils/logger.h"
 
 // CMake compiles subexport.cpp with proxyToClash renamed to these legacy
 // symbols. Keeping the original implementation intact lets this wrapper add one
