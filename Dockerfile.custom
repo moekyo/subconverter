@@ -1,11 +1,18 @@
 FROM alpine:3.24 AS builder
 
 WORKDIR /src
+
+# Keep tool bootstrap and third-party dependency compilation ahead of COPY . so
+# ordinary subconverter source changes reuse the expensive dependency layer.
+RUN apk add --no-cache bash git
+COPY scripts/build.alpine.release.sh /usr/local/bin/subconverter-build
+RUN chmod +x /usr/local/bin/subconverter-build \
+    && /usr/local/bin/subconverter-build dependencies
+
 COPY . .
 
-RUN apk add --no-cache bash git
 ARG SKIP_RULE_UPDATE=0
-RUN SKIP_RULE_UPDATE="$SKIP_RULE_UPDATE" bash scripts/build.alpine.release.sh
+RUN SKIP_RULE_UPDATE="$SKIP_RULE_UPDATE" /usr/local/bin/subconverter-build project
 
 FROM alpine:3.24
 
