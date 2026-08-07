@@ -22,6 +22,14 @@ OPTION(USING_MALLOC_TRIM "Call malloc_trim after processing request to lower mem
 #OPTION(USING_MBEDTLS "Use mbedTLS instead of OpenSSL for MD5 calculation." OFF)
 OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essential part." OFF)
 
+# Keep the upstream Clash exporter byte-for-byte intact and compile its two
+# overloads under private legacy symbols. subexport_clash_preserve.cpp exposes
+# the public symbols and adds generic preservation of proxy groups declared by
+# the Clash base before custom groups are generated.
+SET_SOURCE_FILES_PROPERTIES(
+    src/generator/config/subexport.cpp
+    PROPERTIES COMPILE_DEFINITIONS "proxyToClash=proxyToClashLegacy")
+
 INCLUDE(CheckCXXSourceCompiles)
 CHECK_CXX_SOURCE_COMPILES(
 "
@@ -35,6 +43,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
+    src/generator/config/subexport_clash_preserve.cpp
     src/generator/template/templates.cpp
     src/handler/interfaces.cpp
     src/handler/multithread.cpp
@@ -119,6 +128,7 @@ ELSE() #BUILD_STATIC_LIBRARY
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
+    src/generator/config/subexport_clash_preserve.cpp
     src/generator/template/templates.cpp
     src/lib/wrapper.cpp
     src/parser/subparser.cpp
@@ -152,7 +162,7 @@ TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} PRIVATE ${PCRE2_LIBRARY})
 TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE -DPCRE2_STATIC)
 
 IF(WIN32)
-    TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} PRIVATE ws2_32)
+    TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} PRIVATE wsock32 ws2_32)
 ENDIF()
 
 ENDIF() #BUILD_STATIC_LIBRARY
