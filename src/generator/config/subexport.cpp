@@ -385,9 +385,15 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["client-fingerprint"] = x.Fingerprint;
             if(!x.PublicKey.empty())
             {
+                // REALITY short-id is a protocol hex string, not a numeric identifier.
+                // Explicit string tags avoid relying on YAML emitter/parser type inference.
                 singleproxy["reality-opts"]["public-key"] = x.PublicKey;
+                singleproxy["reality-opts"]["public-key"].SetTag("tag:yaml.org,2002:str");
                 if(!x.ShortId.empty())
+                {
                     singleproxy["reality-opts"]["short-id"] = x.ShortId;
+                    singleproxy["reality-opts"]["short-id"].SetTag("tag:yaml.org,2002:str");
+                }
             }
 
             switch(hash_(x.TransferProtocol.empty() ? "tcp" : x.TransferProtocol))
