@@ -4,6 +4,24 @@ This fork directly adds fallback health-check field support in the source code f
 
 ## What this build adds
 
+### Modern Mihomo node preservation
+
+For Clash/Mihomo source → Clash/Mihomo target conversion, this fork now keeps VLESS + REALITY + Vision as a first-class node instead of dropping it. The round-trip preserves:
+
+- `uuid`
+- `network`
+- `tls`
+- `flow`
+- `servername`
+- `client-fingerprint`
+- `reality-opts.public-key`
+- `reality-opts.short-id`
+- `udp`, `fast-open`, and `skip-cert-verify` when present
+
+Hysteria2 Clash output also preserves the input `fingerprint` field. That matters for certificate pinning when the server uses a self-signed certificate.
+
+The VLESS change is intentionally scoped to Clash/Mihomo input/output. Other target formats keep their existing behavior rather than receiving speculative VLESS mappings.
+
 ### Fallback health-check fields
 
 `custom_groups` TOML handling for `type = "fallback"` parses and emits these fields into the generated Clash/Mihomo YAML:

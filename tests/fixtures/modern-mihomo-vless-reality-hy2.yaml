@@ -1,0 +1,26 @@
+proxies:
+  - name: VPS-Reality
+    type: vless
+    server: 203.0.113.10
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    network: tcp
+    udp: true
+    tls: true
+    servername: aws.amazon.com
+    flow: xtls-rprx-vision
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: TEST_PUBLIC_KEY
+      short-id: deadbeef
+  - name: VPS-HY2
+    type: hysteria2
+    server: 203.0.113.10
+    port: 443
+    password: TEST_HY2_PASSWORD
+    obfs: salamander
+    obfs-password: TEST_OBFS_PASSWORD
+    sni: hy2.local
+    fingerprint: AA:BB:CC:DD
+    alpn: [h3]
+    udp: true

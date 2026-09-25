@@ -116,6 +116,8 @@ namespace qjs
             JS_DefinePropertyValueStr(ctx, obj, "AlterId", JS_NewInt32(ctx, n.AlterId), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "TransferProtocol", JS_NewString(ctx, n.TransferProtocol), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "FakeType", JS_NewString(ctx, n.FakeType), JS_PROP_C_W_E);
+            JS_DefinePropertyValueStr(ctx, obj, "Flow", JS_NewString(ctx, n.Flow), JS_PROP_C_W_E);
+            JS_DefinePropertyValueStr(ctx, obj, "ShortId", JS_NewString(ctx, n.ShortId), JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, obj, "TLSSecure", JS_NewBool(ctx, n.TLSSecure), JS_PROP_C_W_E);
 
             JS_DefinePropertyValueStr(ctx, obj, "Host", JS_NewString(ctx, n.Host), JS_PROP_C_W_E);
@@ -171,6 +173,8 @@ namespace qjs
             node.AlterId = unwrap_free<uint32_t>(ctx, v, "AlterId");
             node.TransferProtocol = unwrap_free<std::string>(ctx, v, "TransferProtocol");
             node.FakeType = unwrap_free<std::string>(ctx, v, "FakeType");
+            node.Flow = unwrap_free<std::string>(ctx, v, "Flow");
+            node.ShortId = unwrap_free<std::string>(ctx, v, "ShortId");
             node.TLSSecure = unwrap_free<bool>(ctx, v, "TLSSecure");
 
             node.Host = unwrap_free<std::string>(ctx, v, "Host");
