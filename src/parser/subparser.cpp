@@ -63,6 +63,22 @@ void vmessConstruct(Proxy &node, const std::string &group, const std::string &re
     node.TLSSecure = tls == "tls";
 }
 
+void vlessConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &add, const std::string &port, const std::string &id, const std::string &flow, const std::string &net, const std::string &path, const std::string &host, bool tlssecure, const std::string &sni, const std::string &fingerprint, const std::string &public_key, const std::string &short_id, tribool udp, tribool tfo, tribool scv, const std::string& underlying_proxy)
+{
+    commonConstruct(node, ProxyType::VLESS, group, remarks, add, port, udp, tfo, scv, tribool(), underlying_proxy);
+    node.UserId = id;
+    node.EncryptMethod = "none";
+    node.TransferProtocol = net.empty() ? "tcp" : net;
+    node.Path = path;
+    node.Host = host;
+    node.Flow = flow;
+    node.ShortId = short_id;
+    node.ServerName = sni;
+    node.Fingerprint = fingerprint;
+    node.PublicKey = public_key;
+    node.TLSSecure = tlssecure;
+}
+
 void ssrConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &server, const std::string &port, const std::string &protocol, const std::string &method, const std::string &obfs, const std::string &password, const std::string &obfsparam, const std::string &protoparam, tribool udp, tribool tfo, tribool scv,const std::string& underlying_proxy)
 {
     commonConstruct(node, ProxyType::ShadowsocksR, group, remarks, server, port, udp, tfo, scv, tribool(), underlying_proxy);
@@ -1187,6 +1203,60 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
 
             vmessConstruct(node, group, ps, server, port, "", id, aid, net, cipher, path, host, edge, tls, sni, udp, tfo, scv, tribool(), underlying_proxy);
             break;
+        case "vless"_hash:
+        {
+            group = V2RAY_DEFAULT_GROUP;
+            std::string flow, fingerprint_value, public_key_value, short_id_value;
+            std::string vless_path, vless_host, vless_sni;
+            std::string vless_net = singleproxy["network"].IsDefined() ? safe_as<std::string>(singleproxy["network"]) : "tcp";
+
+            singleproxy["uuid"] >>= id;
+            if(id.empty())
+                continue;
+            singleproxy["flow"] >>= flow;
+            singleproxy["servername"] >>= vless_sni;
+            singleproxy["client-fingerprint"] >>= fingerprint_value;
+
+            bool tlssecure = safe_as<std::string>(singleproxy["tls"]) == "true";
+            if(singleproxy["reality-opts"].IsDefined())
+            {
+                singleproxy["reality-opts"]["public-key"] >>= public_key_value;
+                singleproxy["reality-opts"]["short-id"] >>= short_id_value;
+                tlssecure = true;
+            }
+
+            switch(hash_(vless_net))
+            {
+            case "tcp"_hash:
+                break;
+            case "ws"_hash:
+                if(singleproxy["ws-opts"].IsDefined())
+                {
+                    vless_path = singleproxy["ws-opts"]["path"].IsDefined() ? safe_as<std::string>(singleproxy["ws-opts"]["path"]) : "/";
+                    singleproxy["ws-opts"]["headers"]["Host"] >>= vless_host;
+                }
+                break;
+            case "grpc"_hash:
+                singleproxy["grpc-opts"]["grpc-service-name"] >>= vless_path;
+                break;
+            case "h2"_hash:
+                singleproxy["h2-opts"]["path"] >>= vless_path;
+                if(singleproxy["h2-opts"]["host"].IsSequence() && singleproxy["h2-opts"]["host"].size())
+                    singleproxy["h2-opts"]["host"][0] >>= vless_host;
+                break;
+            case "http"_hash:
+                if(singleproxy["http-opts"]["path"].IsSequence() && singleproxy["http-opts"]["path"].size())
+                    singleproxy["http-opts"]["path"][0] >>= vless_path;
+                if(singleproxy["http-opts"]["headers"]["Host"].IsSequence() && singleproxy["http-opts"]["headers"]["Host"].size())
+                    singleproxy["http-opts"]["headers"]["Host"][0] >>= vless_host;
+                break;
+            default:
+                continue;
+            }
+
+            vlessConstruct(node, group, ps, server, port, id, flow, vless_net, vless_path, vless_host, tlssecure, vless_sni, fingerprint_value, public_key_value, short_id_value, udp, tfo, scv, underlying_proxy);
+            break;
+        }
         case "ss"_hash:
             group = SS_DEFAULT_GROUP;
 

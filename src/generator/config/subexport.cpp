@@ -121,6 +121,7 @@ bool applyMatcher(const std::string &rule, std::string &real_rule, const Proxy &
         {ProxyType::Shadowsocks,  "SS"},
         {ProxyType::ShadowsocksR, "SSR"},
         {ProxyType::VMess,        "VMESS"},
+        {ProxyType::VLESS,        "VLESS"},
         {ProxyType::Trojan,       "TROJAN"},
         {ProxyType::Snell,        "SNELL"},
         {ProxyType::HTTP,         "HTTP"},
@@ -369,6 +370,55 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 continue;
             }
             break;
+        case ProxyType::VLESS:
+            singleproxy["type"] = "vless";
+            singleproxy["uuid"] = x.UserId;
+            singleproxy["network"] = x.TransferProtocol.empty() ? "tcp" : x.TransferProtocol;
+            singleproxy["tls"] = x.TLSSecure;
+            if(!x.Flow.empty())
+                singleproxy["flow"] = x.Flow;
+            if(!scv.is_undef())
+                singleproxy["skip-cert-verify"] = scv.get();
+            if(!x.ServerName.empty())
+                singleproxy["servername"] = x.ServerName;
+            if(!x.Fingerprint.empty())
+                singleproxy["client-fingerprint"] = x.Fingerprint;
+            if(!x.PublicKey.empty())
+            {
+                singleproxy["reality-opts"]["public-key"] = x.PublicKey;
+                if(!x.ShortId.empty())
+                    singleproxy["reality-opts"]["short-id"] = x.ShortId;
+            }
+
+            switch(hash_(x.TransferProtocol.empty() ? "tcp" : x.TransferProtocol))
+            {
+            case "tcp"_hash:
+                break;
+            case "ws"_hash:
+                singleproxy["ws-opts"]["path"] = x.Path.empty() ? "/" : x.Path;
+                if(!x.Host.empty())
+                    singleproxy["ws-opts"]["headers"]["Host"] = x.Host;
+                break;
+            case "grpc"_hash:
+                if(!x.Path.empty())
+                    singleproxy["grpc-opts"]["grpc-service-name"] = x.Path;
+                break;
+            case "h2"_hash:
+                if(!x.Path.empty())
+                    singleproxy["h2-opts"]["path"] = x.Path;
+                if(!x.Host.empty())
+                    singleproxy["h2-opts"]["host"].push_back(x.Host);
+                break;
+            case "http"_hash:
+                if(!x.Path.empty())
+                    singleproxy["http-opts"]["path"].push_back(x.Path);
+                if(!x.Host.empty())
+                    singleproxy["http-opts"]["headers"]["Host"].push_back(x.Host);
+                break;
+            default:
+                continue;
+            }
+            break;
         case ProxyType::ShadowsocksR:
             //ignoring all nodes with unsupported obfs, protocols and encryption
             if(ext.filter_deprecated)
@@ -547,6 +597,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["sni"] = x.SNI;
             if (!scv.is_undef())
                 singleproxy["skip-cert-verify"] = scv.get();
+            if (!x.Fingerprint.empty())
+                singleproxy["fingerprint"] = x.Fingerprint;
             if (!x.Alpn.empty())
                 singleproxy["alpn"] = x.Alpn;
             if (!x.Ca.empty())

@@ -24,6 +24,7 @@ enum class ProxyType
     Hysteria,
     Hysteria2,
     AnyTLS,
+    VLESS,
 };
 
 inline String getProxyTypeName(ProxyType type)
@@ -54,6 +55,8 @@ inline String getProxyTypeName(ProxyType type)
         return "Hysteria2";
     case ProxyType::AnyTLS:
         return "AnyTLS";
+    case ProxyType::VLESS:
+        return "VLESS";
     default:
         return "Unknown";
     }
@@ -82,6 +85,8 @@ struct Proxy
     uint16_t AlterId = 0;
     String TransferProtocol;
     String FakeType;
+    String Flow;
+    String ShortId;
     bool TLSSecure = false;
 
     String Host;
