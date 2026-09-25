@@ -1,16 +1,6 @@
 name: Custom Docker Image
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - Dockerfile.custom
-      - src/config/proxygroup.h
-      - src/config/binding.h
-      - src/generator/config/subexport.cpp
-      - scripts/build.alpine.release.sh
-      - .github/workflows/custom-docker.yml
   workflow_dispatch:
     inputs:
       tag:
