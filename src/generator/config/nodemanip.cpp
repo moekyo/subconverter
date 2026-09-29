@@ -140,6 +140,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
     switch(linkType)
     {
     case ConfType::SUB:
+    {
         writeLog(LOG_TYPE_INFO, "Downloading subscription data...");
         if(startsWith(link, "surge:///install-config")) //surge config link
             link = urlDecode(getUrlArg(link, "url"));
@@ -200,6 +201,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
             return -1;
         }
         break;
+    }
     case ConfType::Local:
         if(!authorized)
             return -1;
