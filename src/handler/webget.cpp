@@ -219,7 +219,11 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
             new_url = argument.proxy.substr(5) + new_url;
         }
         else
+        {
             curl_easy_setopt(curl_handle, CURLOPT_PROXY, argument.proxy.data());
+            if(argument.force_proxy)
+                curl_easy_setopt(curl_handle, CURLOPT_NOPROXY, "");
+        }
     }
     curl_progress_data limit;
     limit.size_limit = global.maxAllowedDownloadSize;
@@ -360,12 +364,19 @@ std::string buildSocks5ProxyString(const std::string &addr, int port, const std:
     return proxystr;
 }
 
-std::string webGet(const std::string &url, const std::string &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers)
+std::string webGet(
+    const std::string &url,
+    const std::string &proxy,
+    unsigned int cache_ttl,
+    std::string *response_headers,
+    string_icase_map *request_headers,
+    bool force_proxy)
 {
     int return_code = 0;
     std::string content;
 
-    FetchArgument argument {HTTP_GET, url, proxy, nullptr, request_headers, nullptr, cache_ttl};
+    FetchArgument argument {
+        HTTP_GET, url, proxy, nullptr, request_headers, nullptr, cache_ttl, false, force_proxy};
     FetchResult fetch_res {&return_code, &content, response_headers, nullptr};
 
     if (startsWith(url, "data:"))

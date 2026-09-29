@@ -46,8 +46,11 @@ std::string parseProxy(const std::string &source)
 bool selectSubscriptionProxy(
     const std::string &url,
     const std::string &fallback_proxy,
-    std::string &selected_proxy)
+    std::string &selected_proxy,
+    bool *route_matched)
 {
+    if(route_matched)
+        *route_matched = false;
     if(!global.proxySubscriptionRoutesValid)
     {
         writeLog(0,
@@ -64,6 +67,8 @@ bool selectSubscriptionProxy(
     }
 
     selected_proxy = parseProxy(route->proxy);
+    if(route_matched)
+        *route_matched = true;
     writeLog(0,
              "Using per-source subscription proxy route for host '" +
                  subscriptionProxyRouteHostFromUrl(url) + "'.",
@@ -1517,7 +1522,8 @@ int simpleGenerator()
             {
                 std::string url = ini.get("url");
                 std::string selected_proxy;
-                if(!selectSubscriptionProxy(url, proxy, selected_proxy))
+                bool route_matched = false;
+                if(!selectSubscriptionProxy(url, proxy, selected_proxy, &route_matched))
                 {
                     writeLog(0,
                              "Artifact '" + x + "' subscription proxy route is invalid.",
@@ -1526,7 +1532,8 @@ int simpleGenerator()
                         return -1;
                     continue;
                 }
-                content = fetchFile(url, selected_proxy, global.cacheSubscription);
+                content = fetchFile(
+                    url, selected_proxy, global.cacheSubscription, true, route_matched);
                 if(content.empty())
                 {
                     //std::cerr<<"Artifact '"<<x<<"' generate ERROR! Please check your link.\n\n";

@@ -58,7 +58,13 @@ void safe_set_times(RegexMatchConfigs data)
     global.timeNodeRules.swap(data);
 }
 
-std::shared_future<std::string> fetchFileAsync(const std::string &path, const std::string &proxy, int cache_ttl, bool find_local, bool async)
+std::shared_future<std::string> fetchFileAsync(
+    const std::string &path,
+    const std::string &proxy,
+    int cache_ttl,
+    bool find_local,
+    bool async,
+    bool force_proxy)
 {
     std::shared_future<std::string> retVal;
     /*if(vfs::vfs_exist(path))
@@ -66,7 +72,10 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const st
     else */if(find_local && fileExist(path, true))
         retVal = std::async(std::launch::async, [path](){return fileGet(path, true);});
     else if(isLink(path))
-        retVal = std::async(std::launch::async, [path, proxy, cache_ttl](){return webGet(path, proxy, cache_ttl);});
+        retVal = std::async(std::launch::async, [path, proxy, cache_ttl, force_proxy]()
+        {
+            return webGet(path, proxy, cache_ttl, nullptr, nullptr, force_proxy);
+        });
     else
         return std::async(std::launch::async, [](){return std::string();});
     if(!async)
@@ -74,7 +83,12 @@ std::shared_future<std::string> fetchFileAsync(const std::string &path, const st
     return retVal;
 }
 
-std::string fetchFile(const std::string &path, const std::string &proxy, int cache_ttl, bool find_local)
+std::string fetchFile(
+    const std::string &path,
+    const std::string &proxy,
+    int cache_ttl,
+    bool find_local,
+    bool force_proxy)
 {
-    return fetchFileAsync(path, proxy, cache_ttl, find_local, false).get();
+    return fetchFileAsync(path, proxy, cache_ttl, find_local, false, force_proxy).get();
 }
