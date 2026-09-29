@@ -67,6 +67,13 @@ bool selectSubscriptionProxy(
     }
 
     selected_proxy = parseProxy(route->proxy);
+    if(selected_proxy.empty())
+    {
+        writeLog(0,
+                 "Matched per-source subscription proxy route resolved to no proxy; refusing fetch.",
+                 LOG_LEVEL_ERROR);
+        return false;
+    }
     if(route_matched)
         *route_matched = true;
     writeLog(0,

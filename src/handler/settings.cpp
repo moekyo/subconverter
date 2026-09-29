@@ -618,6 +618,7 @@ static void readSubscriptionProxyRoutes(const toml::value &root)
         if(host.empty()
            || host.find_first_of("/*?#@:[ ]\t\r\n") != std::string::npos
            || proxy.empty()
+           || proxy == "NONE"
            || !seen_hosts.emplace(host).second)
         {
             global.proxySubscriptionRoutesValid = false;

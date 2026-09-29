@@ -388,6 +388,8 @@ std::string webGet(
         std::string cache_identity = url;
         if(!proxy.empty())
             cache_identity += "\nproxy-md5:" + getMD5(proxy);
+        if(force_proxy)
+            cache_identity += "\nforce-proxy:1";
         const std::string url_md5 = getMD5(cache_identity);
         const std::string path = "cache/" + url_md5, path_header = path + "_header";
         struct stat result {};
