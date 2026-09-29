@@ -82,6 +82,15 @@ append_proxy_type = false
 # When requesting /sub, reload this config file first.
 reload_conf_on_request = false
 
+# Optional exact-host proxy overrides for subscription downloads (TOML config).
+# Unmatched sources continue to use proxy_subscription above. A matched source
+# uses the selected proxy for the entire libcurl request/redirect chain and does
+# not retry directly when that proxy fails. Keep credential-bearing proxy URLs
+# only in the local preference file.
+# [[proxy_subscription_route]]
+# host = "subscription.example.com"
+# proxy = "http://user:password@192.168.1.1:7890"
+
 [[userinfo.stream_rule]]
 # Rules to extract stream data from node
 # Format: full_match_regex|new_format_regex

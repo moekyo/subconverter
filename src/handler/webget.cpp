@@ -113,6 +113,27 @@ static int size_checker(void *clientp, curl_off_t, curl_off_t dlnow, curl_off_t,
     return 0;
 }
 
+static std::string redactCurlLogLine(std::string content)
+{
+    content = trimWhitespace(content);
+    std::string lower = content;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch)
+    {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    for(const auto *header : {"authorization:", "proxy-authorization:", "cookie:", "set-cookie:"})
+    {
+        if(startsWith(lower, header))
+            return std::string(header) + " <redacted>";
+    }
+    if(lower.find("proxy auth using") != std::string::npos)
+        return "proxy authentication: <redacted>";
+    if(lower.find("server auth using") != std::string::npos)
+        return "server authentication: <redacted>";
+    return content;
+}
+
 static int logger(CURL *handle, curl_infotype type, char *data, size_t size, void *userptr)
 {
     (void)handle;
@@ -141,14 +162,14 @@ static int logger(CURL *handle, curl_infotype type, char *data, size_t size, voi
         for(auto &x : lines)
         {
             std::string log_content = prefix;
-            log_content += x;
+            log_content += redactCurlLogLine(x);
             writeLog(0, log_content, LOG_LEVEL_VERBOSE);
         }
     }
     else
     {
         std::string log_content = prefix;
-        log_content += trimWhitespace(content);
+        log_content += redactCurlLogLine(content);
         writeLog(0, log_content, LOG_LEVEL_VERBOSE);
     }
     return 0;
@@ -353,7 +374,10 @@ std::string webGet(const std::string &url, const std::string &proxy, unsigned in
     if(cache_ttl > 0)
     {
         md("cache");
-        const std::string url_md5 = getMD5(url);
+        std::string cache_identity = url;
+        if(!proxy.empty())
+            cache_identity += "\nproxy-md5:" + getMD5(proxy);
+        const std::string url_md5 = getMD5(cache_identity);
         const std::string path = "cache/" + url_md5, path_header = path + "_header";
         struct stat result {};
         if(stat(path.data(), &result) == 0) // cache exist

@@ -237,6 +237,13 @@ build_dependencies() {
 build_project() {
     validate_runtime_controls
 
+    run_quiet "Test per-source subscription proxy routing" bash -c '
+        g++ -std=c++20 -Wall -Wextra -Isrc tests/subscription-proxy-route.cpp \
+            -o /tmp/subscription-proxy-route-test
+        /tmp/subscription-proxy-route-test
+        rm -f /tmp/subscription-proxy-route-test
+    '
+
     export PKG_CONFIG_PATH=/usr/lib64/pkgconfig
     run_quiet "Configure subconverter" cmake -DCMAKE_BUILD_TYPE=Release .
     run_with_heartbeat "Compile subconverter" make -j3

@@ -43,6 +43,34 @@ std::string parseProxy(const std::string &source)
     return proxy;
 }
 
+bool selectSubscriptionProxy(
+    const std::string &url,
+    const std::string &fallback_proxy,
+    std::string &selected_proxy)
+{
+    if(!global.proxySubscriptionRoutesValid)
+    {
+        writeLog(0,
+                 "Per-source subscription proxy routes are invalid; refusing subscription fetch.",
+                 LOG_LEVEL_ERROR);
+        return false;
+    }
+
+    const auto *route = matchSubscriptionProxyRoute(url, global.proxySubscriptionRoutes);
+    if(route == nullptr)
+    {
+        selected_proxy = fallback_proxy;
+        return true;
+    }
+
+    selected_proxy = parseProxy(route->proxy);
+    writeLog(0,
+             "Using per-source subscription proxy route for host '" +
+                 subscriptionProxyRouteHostFromUrl(url) + "'.",
+             LOG_LEVEL_INFO);
+    return true;
+}
+
 extern string_array ClashRuleTypes, SurgeRuleTypes, QuanXRuleTypes;
 
 struct UAProfile
@@ -1488,7 +1516,17 @@ int simpleGenerator()
             if(ini.get_bool("direct"))
             {
                 std::string url = ini.get("url");
-                content = fetchFile(url, proxy, global.cacheSubscription);
+                std::string selected_proxy;
+                if(!selectSubscriptionProxy(url, proxy, selected_proxy))
+                {
+                    writeLog(0,
+                             "Artifact '" + x + "' subscription proxy route is invalid.",
+                             LOG_LEVEL_ERROR);
+                    if(sections.size() == 1)
+                        return -1;
+                    continue;
+                }
+                content = fetchFile(url, selected_proxy, global.cacheSubscription);
                 if(content.empty())
                 {
                     //std::cerr<<"Artifact '"<<x<<"' generate ERROR! Please check your link.\n\n";

@@ -10,6 +10,10 @@
 #include "server/webserver.h"
 
 std::string parseProxy(const std::string &source);
+bool selectSubscriptionProxy(
+    const std::string &url,
+    const std::string &fallback_proxy,
+    std::string &selected_proxy);
 
 void refreshRulesets(RulesetConfigs &ruleset_list, std::vector<RulesetContent> &rca);
 void readConf();

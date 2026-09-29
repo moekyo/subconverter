@@ -1,5 +1,6 @@
 #include <string>
 #include <mutex>
+#include <set>
 #include <toml.hpp>
 
 #include "config/binding.h"
@@ -582,6 +583,54 @@ void operate_toml_kv_table(const std::vector<toml::table> &arr, const toml::valu
     }
 }
 
+static void readSubscriptionProxyRoutes(const toml::value &root)
+{
+    global.proxySubscriptionRoutes.clear();
+    global.proxySubscriptionRoutesValid = true;
+
+    const auto routes = toml::find_or<std::vector<toml::table>>(
+        root, "proxy_subscription_route", {});
+    std::set<std::string> seen_hosts;
+    for(const auto &table : routes)
+    {
+        const auto host_iter = table.find("host");
+        const auto proxy_iter = table.find("proxy");
+        bool unknown_field = false;
+        for(const auto &item : table)
+        {
+            if(item.first != "host" && item.first != "proxy")
+                unknown_field = true;
+        }
+        if(unknown_field
+           || host_iter == table.end() || proxy_iter == table.end()
+           || !host_iter->second.is_string() || !proxy_iter->second.is_string())
+        {
+            global.proxySubscriptionRoutesValid = false;
+            writeLog(0,
+                     "Invalid proxy_subscription_route: only string host/proxy fields are allowed.",
+                     LOG_LEVEL_ERROR);
+            continue;
+        }
+
+        std::string host = normalizeSubscriptionProxyHost(
+            toml::get<std::string>(host_iter->second));
+        const std::string proxy = toml::get<std::string>(proxy_iter->second);
+        if(host.empty()
+           || host.find_first_of("/*?#@:[ ]\t\r\n") != std::string::npos
+           || proxy.empty()
+           || !seen_hosts.emplace(host).second)
+        {
+            global.proxySubscriptionRoutesValid = false;
+            writeLog(0,
+                     "Invalid proxy_subscription_route: host must be unique/exact and proxy must be non-empty.",
+                     LOG_LEVEL_ERROR);
+            continue;
+        }
+
+        global.proxySubscriptionRoutes.push_back({std::move(host), proxy});
+    }
+}
+
 void readTOMLConf(toml::value &root)
 {
     auto section_common = toml::find(root, "common");
@@ -617,6 +666,7 @@ void readTOMLConf(toml::value &root)
                   "append_proxy_type", global.appendType,
                   "reload_conf_on_request", global.reloadConfOnRequest
     );
+    readSubscriptionProxyRoutes(root);
 
     if(filter)
         find_if_exist(section_common, "filter_script", global.filterScript);
@@ -792,6 +842,8 @@ void readConf()
     eraseElements(global.includeRemarks);
     eraseElements(global.customProxyGroups);
     eraseElements(global.customRulesets);
+    global.proxySubscriptionRoutes.clear();
+    global.proxySubscriptionRoutesValid = true;
 
     try
     {

@@ -9,6 +9,7 @@
 #include "config/ruleset.h"
 #include "generator/config/ruleconvert.h"
 #include "generator/template/templates.h"
+#include "handler/subscription_proxy_route.h"
 #include "utils/logger.h"
 #include "utils/string.h"
 #include "utils/stl_extra.h"
@@ -50,6 +51,8 @@ struct Settings
     bool clashUseNewField = false, singBoxAddClashModes = true;
     std::string clashProxiesStyle = "flow", clashProxyGroupsStyle = "block";
     std::string proxyConfig, proxyRuleset, proxySubscription;
+    std::vector<SubscriptionProxyRoute> proxySubscriptionRoutes;
+    bool proxySubscriptionRoutesValid = true;
     int updateInterval = 0;
     std::string sortScript, filterScript;
 

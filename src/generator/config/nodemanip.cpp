@@ -3,6 +3,7 @@
 #include <iostream>
 #include <algorithm>
 
+#include "handler/interfaces.h"
 #include "handler/settings.h"
 #include "handler/webget.h"
 #include "parser/config/proxy.h"
@@ -142,7 +143,14 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         writeLog(LOG_TYPE_INFO, "Downloading subscription data...");
         if(startsWith(link, "surge:///install-config")) //surge config link
             link = urlDecode(getUrlArg(link, "url"));
-        strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, request_headers);
+        std::string selected_proxy;
+        if(!selectSubscriptionProxy(link, proxy, selected_proxy))
+        {
+            writeLog(LOG_TYPE_ERROR,
+                     "Subscription proxy route configuration is invalid; refusing fetch.");
+            return -1;
+        }
+        strSub = webGet(link, selected_proxy, global.cacheSubscription, &extra_headers, request_headers);
         /*
         if(strSub.size() == 0)
         {
