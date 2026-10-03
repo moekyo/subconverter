@@ -22,3 +22,19 @@ target_link_libraries(policy-contracts PRIVATE subconverter)
 add_executable(subscription-proxy-route subscription-proxy-route.cpp)
 target_include_directories(subscription-proxy-route PRIVATE ../src)
 target_compile_options(subscription-proxy-route PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+
+option(BUILD_FETCH_TESTS "Build the real-curl loopback regression driver" OFF)
+if(BUILD_FETCH_TESTS)
+    find_package(CURL REQUIRED)
+    add_executable(fetch-contract-driver
+        fetch-contract-driver.cpp
+        ../src/handler/webget.cpp
+        ../src/utils/file.cpp
+        ../src/utils/string.cpp
+        ../src/utils/urlencode.cpp
+        ../src/utils/base64/base64.cpp
+        ../src/utils/md5/md5.cpp)
+    target_compile_definitions(fetch-contract-driver PRIVATE NO_JS_RUNTIME)
+    target_include_directories(fetch-contract-driver PRIVATE ../src ${RAPIDJSON_INCLUDE_DIRS} ${YAML_CPP_INCLUDE_DIRS})
+    target_link_libraries(fetch-contract-driver PRIVATE CURL::libcurl)
+endif()

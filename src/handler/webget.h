@@ -34,6 +34,9 @@ struct FetchResult
     std::string *content = nullptr;
     std::string *response_headers = nullptr;
     std::string *cookies = nullptr;
+    // Preserve transport completion separately from the upstream HTTP status.
+    int transport_code = 0;
+    int upstream_http_status = 0;
 };
 
 int webGet(const FetchArgument& argument, FetchResult &result);

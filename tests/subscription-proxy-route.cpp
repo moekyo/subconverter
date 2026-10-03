@@ -33,5 +33,10 @@ int main()
         "https://unmatched.example.com/token",
         routes) == nullptr);
 
+    for(const auto &proxy : {"http://127.0.0.1:7890", "HTTPS://proxy.example", "socks5h://user:pass@[::1]:1080", "socks4a://proxy.example/"})
+        assert(isSupportedForcedSubscriptionProxy(proxy));
+    for(const auto &proxy : {"", "NONE", "cors:", "cors:https://proxy.example/", "file:///tmp/proxy", "http://", "http://:8080", "http://proxy.example:0", "http://proxy.example:65536", "http://proxy.example:443junk", "http://proxy.example/path"})
+        assert(!isSupportedForcedSubscriptionProxy(proxy));
+
     return 0;
 }

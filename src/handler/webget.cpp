@@ -200,6 +200,18 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
 //static std::string curlGet(const std::string &url, const std::string &proxy, std::string &response_headers, CURLcode &return_code, const string_map &request_headers)
 static int curlGet(const FetchArgument &argument, FetchResult &result)
 {
+    result.transport_code = CURLE_OK;
+    result.upstream_http_status = 0;
+    if(argument.force_proxy && !isSupportedForcedSubscriptionProxy(argument.proxy))
+    {
+        *result.status_code = 0;
+        result.transport_code = CURLE_COULDNT_CONNECT;
+        if(result.content) result.content->clear();
+        if(result.response_headers) result.response_headers->clear();
+        if(result.cookies) result.cookies->clear();
+        writeLog(0, "Forced subscription proxy is invalid or unsupported; refusing fetch.", LOG_LEVEL_ERROR);
+        return 0;
+    }
     CURL *curl_handle;
     std::string *data = result.content, new_url = argument.url;
     const bool strip_fingerprint = stripFingerprintMarker(new_url);
@@ -300,6 +312,10 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     unsigned int fail_count = 0, max_fails = 1;
     while(true)
     {
+        // Every attempt is a distinct response, including reused result objects.
+        if(data) data->clear();
+        if(result.response_headers) result.response_headers->clear();
+        if(result.cookies) result.cookies->clear();
         retVal = curl_easy_perform(curl_handle);
         if(retVal == CURLE_OK || max_fails <= fail_count || global.APIMode)
             break;
@@ -309,7 +325,9 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
 
     long code = 0;
     curl_easy_getinfo(curl_handle, CURLINFO_HTTP_CODE, &code);
-    *result.status_code = code;
+    result.upstream_http_status = static_cast<int>(code);
+    result.transport_code = static_cast<int>(retVal);
+    *result.status_code = retVal == CURLE_OK ? static_cast<int>(code) : 0;
 
     if(result.cookies)
     {
@@ -372,6 +390,12 @@ std::string webGet(
     string_icase_map *request_headers,
     bool force_proxy)
 {
+    if(force_proxy && !isSupportedForcedSubscriptionProxy(proxy))
+    {
+        if(response_headers) response_headers->clear();
+        writeLog(0, "Forced subscription proxy is invalid or unsupported; refusing fetch and cached fallback.", LOG_LEVEL_ERROR);
+        return "";
+    }
     int return_code = 0;
     std::string content;
 
@@ -385,7 +409,20 @@ std::string webGet(
     if(cache_ttl > 0)
     {
         md("cache");
-        std::string cache_identity = url;
+        // Version the namespace so old entries lacking request context cannot
+        // satisfy authenticated requests after the fix. Values are only hashed.
+        std::string cache_identity = "fetch-cache-v2\n" + url;
+        if(request_headers)
+        {
+            std::string context = "headers-present\n";
+            for(const auto &entry : *request_headers)
+            {
+                auto key = entry.first;
+                std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
+                context += std::to_string(key.size()) + ":" + key + std::to_string(entry.second.size()) + ":" + entry.second;
+            }
+            cache_identity += "\nrequest-context-md5:" + getMD5(context);
+        }
         if(!proxy.empty())
             cache_identity += "\nproxy-md5:" + getMD5(proxy);
         if(force_proxy)
@@ -412,7 +449,7 @@ std::string webGet(
             writeLog(0, "CACHE NOT EXIST: '" + url + "', creating new cache.");
         //content = curlGet(url, proxy, response_headers, return_code); // try to fetch data
         curlGet(argument, fetch_res);
-        if(return_code == 200) // success, save new cache
+        if(return_code == 200 && fetch_res.transport_code == CURLE_OK) // complete response only
         {
             //guarded_mutex guard(cache_rw_lock);
             cache_rw_lock.writeLock();
