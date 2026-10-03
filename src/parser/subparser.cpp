@@ -508,48 +508,46 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes)
     }
 }
 
-void explodeSS(std::string ss, Proxy &node)
+void explodeSS(std::string uri, Proxy &node)
 {
-    std::string ps, password, method, server, port, plugins, plugin, pluginopts, addition, group = SS_DEFAULT_GROUP, secret;
-    //std::vector<std::string> args, secret;
-    ss = replaceAllDistinct(ss.substr(5), "/?", "?");
-    if(strFind(ss, "#"))
+    // SIP002: AEAD-2022 uses percent-encoded plaintext userinfo. Keep legacy
+    // Base64 userinfo and whole-authority links without decoding secrets twice.
+    const auto end = uri.find_first_of("?#");
+    const auto authority = uri.substr(5, end == std::string::npos ? std::string::npos : end - 5);
+    if(authority.find('@') == std::string::npos)
     {
-        auto sspos = ss.find('#');
-        ps = urlDecode(ss.substr(sspos + 1));
-        ss.erase(sspos);
+        if(!regMatch(authority, "^[A-Za-z0-9+/_-]+={0,2}$") || authority.size() % 4 == 1) return;
+        const auto decoded = urlSafeBase64Decode(authority);
+        const auto at = decoded.rfind('@');
+        if(at == std::string::npos) return;
+        uri = "ss://" + urlEncode(decoded.substr(0, at)) + "@" + decoded.substr(at + 1) +
+            (end == std::string::npos ? "" : uri.substr(end));
     }
-
-    if(strFind(ss, "?"))
+    share_uri::Link link;
+    if(!share_uri::parse(uri, "ss", link)) return;
+    auto credentials = link.userinfo;
+    if(credentials.find(':') == std::string::npos)
     {
-        addition = ss.substr(ss.find('?') + 1);
-        plugins = urlDecode(getUrlArg(addition, "plugin"));
-        auto pluginpos = plugins.find(';');
-        plugin = plugins.substr(0, pluginpos);
-        pluginopts = plugins.substr(pluginpos + 1);
-        group = getUrlArg(addition, "group");
-        if(!group.empty())
-            group = urlSafeBase64Decode(group);
-        ss.erase(ss.find('?'));
+        if(!regMatch(credentials, "^[A-Za-z0-9+/_-]+={0,2}$") || credentials.size() % 4 == 1) return;
+        credentials = urlSafeBase64Decode(credentials);
     }
-    if(strFind(ss, "@"))
+    const auto colon = credentials.find(':');
+    if(colon == std::string::npos) return;
+    const auto method = credentials.substr(0, colon), password = credentials.substr(colon + 1);
+    if(std::any_of(credentials.begin(), credentials.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; })) return;
+    if(std::find(ss_ciphers.begin(), ss_ciphers.end(), method) == ss_ciphers.end()) return;
+    std::string plugin, options;
+    const auto plugin_value = link.get("plugin");
+    if(!plugin_value.empty())
     {
-        if(regGetMatch(ss, "(\\S+?)@(\\S+):(\\d+)", 4, 0, &secret, &server, &port))
-            return;
-        if(regGetMatch(urlSafeBase64Decode(secret), "(\\S+?):(\\S+)", 3, 0, &method, &password))
-            return;
+        const auto separator = plugin_value.find(';');
+        plugin = plugin_value.substr(0, separator);
+        if(separator != std::string::npos) options = plugin_value.substr(separator + 1);
     }
-    else
-    {
-        if(regGetMatch(urlSafeBase64Decode(ss), "(\\S+?):(\\S+)@(\\S+):(\\d+)", 5, 0, &method, &password, &server, &port))
-            return;
-    }
-    if(port == "0")
-        return;
-    if(ps.empty())
-        ps = server + ":" + port;
-
-    ssConstruct(node, group, ps, server, port, password, method, plugin, pluginopts);
+    for(const auto &arg : link.query)
+        if(arg.first != "plugin" && arg.first != "group") return;
+    const auto group = link.get("group").empty() ? SS_DEFAULT_GROUP : urlSafeBase64Decode(link.get("group"));
+    ssConstruct(node, group, link.remark, link.server, link.port, password, method, plugin, options);
 }
 
 void explodeSSD(std::string link, std::vector<Proxy> &nodes)
@@ -962,6 +960,13 @@ void explodeTrojan(std::string trojan, Proxy &node)
     trojanConstruct(node, group, remark, server, port, psk, network, host, path, true, tribool(), tfo, scv);
 }
 
+static string_array splitConfigPair(const std::string &value)
+{
+    const auto equal = value.find('=');
+    if(equal == std::string::npos) return {value};
+    return {value.substr(0, equal), value.substr(equal + 1)};
+}
+
 void explodeQuan(const std::string &quan, Proxy &node)
 {
     std::string strTemp, itemName, itemVal;
@@ -985,7 +990,7 @@ void explodeQuan(const std::string &quan, Proxy &node)
         //read link
         for(uint32_t i = 6; i < configs.size(); i++)
         {
-            vArray = split(configs[i], "=");
+            vArray = splitConfigPair(configs[i]);
             if(vArray.size() < 2)
                 continue;
             itemName = trim(vArray[0]);
@@ -1380,11 +1385,12 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
                         singleproxy["plugin-opts"]["host"] >>= pluginopts_host;
                         tls = safe_as<bool>(singleproxy["plugin-opts"]["tls"]) ? "tls;" : "";
                         singleproxy["plugin-opts"]["path"] >>= path;
-                        pluginopts_mux = safe_as<bool>(singleproxy["plugin-opts"]["mux"]) ? "mux=4;" : "";
+                        pluginopts_mux = safe_as<bool>(singleproxy["plugin-opts"]["mux"]) ? "mux;" : "";
                     }
                     break;
                 default:
-                    break;
+                    writeLog(0, "Skipped SS node: unsupported plugin (content redacted)", LOG_LEVEL_WARNING);
+                    continue;
                 }
             }
             else if(singleproxy["obfs"].IsDefined())
@@ -1409,8 +1415,6 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
                     pluginopts += "host=" + pluginopts_host + ";";
                 if(!path.empty())
                     pluginopts += "path=" + path + ";";
-                if(!pluginopts_mux.empty())
-                    pluginopts += "mux=" + pluginopts_mux + ";";
                 break;
             }
 
@@ -1556,6 +1560,12 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
             singleproxy["hop-interval"] >>= hop_interval;
 
             hysteria2Construct(node, group, ps, server, port, ports, up, down, password, obfs, obfs_password, sni, fingerprint, alpn, ca, ca_str, cwnd, hop_interval, tfo, scv, underlying_proxy);
+            node.UDP = udp;
+            if(singleproxy["alpn"].IsSequence())
+            {
+                singleproxy["alpn"] >>= node.Alpn;
+                node.AlpnSpecified = true;
+            }
             break;
         case "tuic"_hash:
         {
@@ -1794,65 +1804,43 @@ void explodeKitsunebi(std::string kit, Proxy &node)
 }
 
 
-void explodeStdHysteria2(std::string hysteria2, Proxy &node) {
-    std::string add, port, password, host, insecure, up, down, alpn, obfs, obfs_password, remarks, sni, fingerprint;
-    std::string addition;
-    tribool scv;
-    hysteria2 = hysteria2.substr(12);
-    string_size pos;
-
-    pos = hysteria2.rfind("#");
-    if (pos != hysteria2.npos) {
-        remarks = urlDecode(hysteria2.substr(pos + 1));
-        hysteria2.erase(pos);
+void explodeStdHysteria2(std::string uri, Proxy &node)
+{
+    share_uri::Link link;
+    tribool scv, udp, tfo;
+    if(!share_uri::parse(uri, "hysteria2", link, "443", true, true) ||
+       !link.boolean("insecure", scv) || !link.boolean("udp", udp) || !link.boolean("tfo", tfo)) return;
+    const string_array accepted = {"sni", "insecure", "obfs", "obfs-password", "pinSHA256", "alpn", "up", "down", "ports", "udp", "tfo", "hop-interval", "password"};
+    for(const auto &entry : link.query)
+        if(std::find(accepted.begin(), accepted.end(), entry.first) == accepted.end()) return;
+    const auto password = link.userinfo.empty() ? link.get("password") : link.userinfo;
+    if(password.empty() || (!link.userinfo.empty() && !link.get("password").empty() && link.userinfo != link.get("password"))) return;
+    if(!link.get("obfs").empty() && link.get("obfs") != "salamander") return;
+    auto ports = link.ports;
+    uint32_t number = 0;
+    if(!link.get("ports").empty())
+    {
+        if(!share_uri::portRanges(link.get("ports"), number) || (!ports.empty() && ports != link.get("ports"))) return;
+        ports = link.get("ports");
     }
-
-    pos = hysteria2.rfind("?");
-    if (pos != hysteria2.npos) {
-        addition = hysteria2.substr(pos + 1);
-        hysteria2.erase(pos);
+    for(const auto *key : {"up", "down", "hop-interval"})
+        if(!link.get(key).empty() && !share_uri::number(link.get(key), number, INT32_MAX)) return;
+    hysteria2Construct(node, HYSTERIA2_DEFAULT_GROUP, link.remark, link.server, link.port, ports,
+        link.get("up"), link.get("down"), password, link.get("obfs"), link.get("obfs-password"), link.get("sni"),
+        link.get("pinSHA256"), "", "", "", "", link.get("hop-interval"), tfo, scv, "");
+    node.Up = link.get("up"); node.Down = link.get("down");
+    node.UDP = udp;
+    if(link.query.count("alpn"))
+    {
+        node.Alpn = split(link.get("alpn"), ",");
+        node.AlpnSpecified = true;
     }
-
-    if (strFind(hysteria2, "@")) {
-        if (regGetMatch(hysteria2, R"(^(.*?)@(.*)[:](\d+)$)", 4, 0, &password, &add, &port))
-            return;
-    } else {
-        password = getUrlArg(addition, "password");
-        if (password.empty())
-            return;
-
-        if (!strFind(hysteria2, ":"))
-            return;
-
-        if (regGetMatch(hysteria2, R"(^(.*)[:](\d+)$)", 3, 0, &add, &port))
-            return;
-    }
-
-    scv = getUrlArg(addition, "insecure");
-    up = getUrlArg(addition, "up");
-    down = getUrlArg(addition, "down");
-    // the alpn is not supported officially yet
-    alpn = getUrlArg(addition, "alpn");
-    obfs = getUrlArg(addition, "obfs");
-    obfs_password = getUrlArg(addition, "obfs-password");
-    sni = getUrlArg(addition, "sni");
-    fingerprint = getUrlArg(addition, "pinSHA256");
-    if (remarks.empty())
-        remarks = add + ":" + port;
-
-    hysteria2Construct(node, HYSTERIA2_DEFAULT_GROUP, remarks, add, port, port, up, down, password, obfs, obfs_password, sni, fingerprint, "", "", "", "", "", tribool(), scv, "");
-    return;
 }
 
-void explodeHysteria2(std::string hysteria2, Proxy &node) {
-    hysteria2 = regReplace(hysteria2, "(hysteria2|hy2)://", "hysteria2://");
-
-    // replace /? with ?
-    hysteria2 = regReplace(hysteria2, "/\\?", "?", true, false);
-    if (regMatch(hysteria2, "hysteria2://(.*?)[:](.*)")) {
-        explodeStdHysteria2(hysteria2, node);
-        return;
-    }
+void explodeHysteria2(std::string uri, Proxy &node)
+{
+    if(startsWith(uri, "hy2://")) uri.replace(0, 6, "hysteria2://");
+    explodeStdHysteria2(uri, node);
 }
 
 void explodeTuic(const std::string &uri, Proxy &node)
@@ -2041,7 +2029,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
             for(i = 6; i < configs.size(); i++)
             {
-                vArray = split(configs[i], "=");
+                vArray = splitConfigPair(configs[i]);
                 if(vArray.size() < 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2084,7 +2072,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
             for(i = 3; i < configs.size(); i++)
             {
-                vArray = split(configs[i], "=");
+                vArray = splitConfigPair(configs[i]);
                 if(vArray.size() < 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2134,7 +2122,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
             }
             for(i = 5; i < configs.size(); i++)
             {
-                vArray = split(configs[i], "=");
+                vArray = splitConfigPair(configs[i]);
                 if(vArray.size() < 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2166,7 +2154,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
             for(i = 3; i < configs.size(); i++)
             {
-                vArray = split(configs[i], "=");
+                vArray = splitConfigPair(configs[i]);
                 if(vArray.size() != 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2229,7 +2217,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
                 continue;
             for(i = 3; i < configs.size(); i++)
             {
-                vArray = split(configs[i], "=");
+                vArray = splitConfigPair(configs[i]);
                 if(vArray.size() < 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2259,7 +2247,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
             for(i = 3; i < configs.size(); i++)
             {
-                vArray = split(configs[i], "=");
+                vArray = splitConfigPair(configs[i]);
                 if(vArray.size() != 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2296,7 +2284,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
             for(i = 3; i < configs.size(); i++)
             {
-                vArray = split(configs[i], "=");
+                vArray = splitConfigPair(configs[i]);
                 if(vArray.size() != 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2334,7 +2322,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
         case "wireguard"_hash:
             for (i = 1; i < configs.size(); i++)
             {
-                vArray = split(trim(configs[i]), "=");
+                vArray = splitConfigPair(trim(configs[i]));
                 if(vArray.size() != 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2398,7 +2386,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
             for(i = 3; i < configs.size(); i++)
             {
-                vArray = split(configs[i], "=");
+                vArray = splitConfigPair(configs[i]);
                 if(vArray.size() != 2)
                     continue;
                 itemName = trim(vArray[0]);
@@ -2436,7 +2424,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
                 for(i = 1; i < configs.size(); i++)
                 {
-                    vArray = split(trim(configs[i]), "=");
+                    vArray = splitConfigPair(trim(configs[i]));
                     if(vArray.size() != 2)
                         continue;
                     itemName = trim(vArray[0]);
@@ -2537,7 +2525,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
                 for(i = 1; i < configs.size(); i++)
                 {
-                    vArray = split(trim(configs[i]), "=");
+                    vArray = splitConfigPair(trim(configs[i]));
                     if(vArray.size() != 2)
                         continue;
                     itemName = trim(vArray[0]);
@@ -2605,7 +2593,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
                 for(i = 1; i < configs.size(); i++)
                 {
-                    vArray = split(trim(configs[i]), "=");
+                    vArray = splitConfigPair(trim(configs[i]));
                     if(vArray.size() != 2)
                         continue;
                     itemName = trim(vArray[0]);
@@ -2653,7 +2641,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
 
                 for(i = 1; i < configs.size(); i++)
                 {
-                    vArray = split(trim(configs[i]), "=");
+                    vArray = splitConfigPair(trim(configs[i]));
                     if(vArray.size() != 2)
                         continue;
                     itemName = trim(vArray[0]);
@@ -2696,15 +2684,17 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
                 httpConstruct(node, HTTP_DEFAULT_GROUP, remarks, server, port, username, password, tls == "true", tfo, scv, tls13);
                 break;
             case "anytls"_hash: //quantumult x style anytls link
+            {
                 server = trim(configs[0].substr(0, configs[0].rfind(':')));
                 port = trim(configs[0].substr(configs[0].rfind(':') + 1));
-                if (port == "0")
-                    continue;
+                uint32_t anytls_port = 0;
+                if(!share_uri::number(port, anytls_port, 65535) || anytls_port == 0) continue;
+                std::string certificate_pin;
+                bool unsupported = false;
 
                 for (i = 1; i < configs.size(); i++) {
-                    vArray = split(trim(configs[i]), "=");
-                    if (vArray.size() != 2)
-                        continue;
+                    vArray = splitConfigPair(trim(configs[i]));
+                    if(vArray.size() != 2) { unsupported = true; continue; }
                     itemName = trim(vArray[0]);
                     itemVal = trim(vArray[1]);
                     switch (hash_(itemName)) {
@@ -2714,6 +2704,7 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
                         case "tag"_hash:
                             remarks = itemVal;
                             break;
+                        case "tls-host"_hash:
                         case "sni"_hash:
                             host = itemVal;
                             break;
@@ -2729,8 +2720,27 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
                         case "tls13"_hash:
                             tls13 = itemVal;
                             break;
+                        case "tls-cert-sha256"_hash:
+                            certificate_pin = itemVal;
+                            break;
+                        case "over-tls"_hash:
+                            if(itemVal != "true") unsupported = true;
+                            break;
+                        default:
+                            unsupported = true;
+                            break;
                     }
                 }
+                if(unsupported || (!certificate_pin.empty() && scv.get()))
+                {
+                    writeLog(0, "Skipped QX AnyTLS node: unsupported option or inactive certificate pin", LOG_LEVEL_WARNING);
+                    continue;
+                }
+                anyTLSConstruct(node, ANYTLS_DEFAULT_GROUP, remarks, server, port, password, host, udp, tfo, scv, "");
+                node.Fingerprint = certificate_pin;
+                node.TLS13 = tls13;
+                break;
+            }
             default:
                 continue;
             }
@@ -2827,6 +2837,19 @@ void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes)
 
 int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes)
 {
+    const auto first = content.find_first_not_of(" \t\r\n");
+    if(first != std::string::npos && content[first] == '{')
+    {
+        Document document;
+        document.Parse(content.c_str());
+        if(!document.HasParseError() && document.IsObject() &&
+           ((document.HasMember("proxies") && document["proxies"].IsArray()) ||
+            (document.HasMember("Proxy") && document["Proxy"].IsArray())))
+        {
+            explodeClash(YAML::Load(content), nodes);
+            return !nodes.empty();
+        }
+    }
     ConfType filetype = ConfType::Unknow;
 
     if(strFind(content, "\"version\""))
@@ -2892,7 +2915,7 @@ void explode(const std::string &link, Proxy &node)
         explodeVless(link, node);
     else if(startsWith(link, "trojan://"))
         explodeTrojan(link, node);
-    else if (strFind(link, "hysteria2://") || strFind(link, "hy2://"))
+    else if (startsWith(link, "hysteria2://") || startsWith(link, "hy2://"))
         explodeHysteria2(link, node);
     else if (startsWith(link, "anytls://"))
         explodeAnyTLS(link, node);

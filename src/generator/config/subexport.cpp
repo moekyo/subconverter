@@ -348,6 +348,11 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         switch(x.Type)
         {
         case ProxyType::Shadowsocks:
+            if(!x.Plugin.empty() && x.Plugin != "simple-obfs" && x.Plugin != "obfs-local" && x.Plugin != "v2ray-plugin")
+            {
+                warnProxyConversion(x, "Clash", "skipped: unsupported SS plugin must not become bare SS");
+                continue;
+            }
             //latest clash core removed support for chacha20 encryption
             if(ext.filter_deprecated && x.EncryptMethod == "chacha20")
                 continue;
@@ -668,7 +673,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             if (!x.Down.empty())
                 singleproxy["down"] = x.DownSpeed;
             if (!x.Password.empty())
+            {
                 singleproxy["password"] = x.Password;
+                singleproxy["password"].SetTag("tag:yaml.org,2002:str");
+            }
             if (!x.OBFS.empty())
                 singleproxy["obfs"] = x.OBFS;
             if (!x.OBFSParam.empty())
@@ -678,8 +686,11 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             if (!scv.is_undef())
                 singleproxy["skip-cert-verify"] = scv.get();
             if (!x.Fingerprint.empty())
+            {
                 singleproxy["fingerprint"] = x.Fingerprint;
-            if (!x.Alpn.empty())
+                singleproxy["fingerprint"].SetTag("tag:yaml.org,2002:str");
+            }
+            if (!x.Alpn.empty() || x.AlpnSpecified)
                 singleproxy["alpn"] = x.Alpn;
             if (!x.Ca.empty())
                 singleproxy["ca"] = x.Ca;
@@ -731,7 +742,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             continue;
         }
 
-        if((x.Type == ProxyType::AnyTLS || x.Type == ProxyType::VLESS || x.Type == ProxyType::TUIC) && singleproxy["alpn"].IsSequence())
+        if((x.Type == ProxyType::AnyTLS || x.Type == ProxyType::VLESS || x.Type == ProxyType::TUIC || x.Type == ProxyType::Hysteria2) && singleproxy["alpn"].IsSequence())
             for(auto item : singleproxy["alpn"]) item.SetTag("tag:yaml.org,2002:str");
 
         // UDP is not supported yet in clash using snell
@@ -989,6 +1000,12 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
 
     for(Proxy &x : nodes)
     {
+        if((x.Type == ProxyType::Shadowsocks || x.Type == ProxyType::Hysteria2) && !anyTLSTextSafe(x))
+        {
+            warnProxyConversion(x, "Surge", "skipped: value cannot be represented safely in text output");
+            continue;
+        }
+
         const auto original_name = x.Remark;
         if(!x.UnderlyingProxy.empty() && (ext.append_proxy_type || x.UnderlyingProxy.find_first_of(",=\"\\\r\n") != std::string::npos))
         {
@@ -1165,6 +1182,11 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
             ini.set(real_section, "peer", "(" + generatePeer(x) + ")");
             break;
         case ProxyType::Hysteria2:
+            if(!x.Ports.empty() || !x.OBFS.empty() || (!x.Fingerprint.empty() && scv.get()))
+            {
+                warnProxyConversion(x, "Surge", "skipped: HY2 hopping, obfs or insecure pin cannot be preserved");
+                continue;
+            }
             if(surge_ver < 4)
                 continue;
             proxy = "hysteria, " + hostname + ", " + port + ", password=" + password;
@@ -1342,6 +1364,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
 
     for(Proxy &x : nodes)
     {
+        proxyStr.clear();
         if(!x.UnderlyingProxy.empty())
         {
             warnProxyConversion(x, "mixed", "skipped: dialer-proxy cannot be preserved by this output");
@@ -1410,6 +1433,11 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
             break;
         default:
                 warnProxyConversion(x, "mixed", "skipped: unsupported protocol for this output target");
+            continue;
+        }
+        if(proxyStr.empty())
+        {
+            warnProxyConversion(x, "single-protocol URI", "skipped: protocol cannot be represented by this output");
             continue;
         }
         allLinks += proxyStr + "\n";
@@ -1513,6 +1541,12 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini, std::vector<RulesetC
     ini.erase_section();
     for(Proxy &x : nodes)
     {
+        if(!ext.nodelist && x.Type == ProxyType::Shadowsocks && !anyTLSTextSafe(x))
+        {
+            warnProxyConversion(x, "Quantumult", "skipped: value cannot be represented safely in text output");
+            continue;
+        }
+
         if(!x.UnderlyingProxy.empty())
         {
             warnProxyConversion(x, "Quantumult", "skipped: dialer-proxy cannot be preserved by this output");
@@ -1756,6 +1790,12 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
     ini.erase_section();
     for(Proxy &x : nodes)
     {
+        if((x.Type == ProxyType::Shadowsocks || x.Type == ProxyType::Hysteria2) && !anyTLSTextSafe(x))
+        {
+            warnProxyConversion(x, "QuanX", "skipped: value cannot be represented safely in text output");
+            continue;
+        }
+
         if(!x.UnderlyingProxy.empty())
         {
             warnProxyConversion(x, "QuanX", "skipped: dialer-proxy cannot be preserved by this output");
@@ -1785,6 +1825,11 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
         switch(x.Type)
         {
         case ProxyType::VMess:
+            if(transproto != "tcp" && transproto != "ws")
+            {
+                warnProxyConversion(x, "QuanX", "skipped: unsupported VMess transport must not become TCP");
+                continue;
+            }
             if(method == "auto")
                 method = "chacha20-ietf-poly1305";
             proxyStr = "vmess = " + hostname + ":" + port + ", method=" + method + ", password=" + id;
@@ -1860,6 +1905,11 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
             }
             break;
         case ProxyType::Trojan:
+            if(transproto != "tcp")
+            {
+                warnProxyConversion(x, "QuanX", "skipped: unsupported Trojan transport must not become TCP");
+                continue;
+            }
             proxyStr = "trojan = " + hostname + ":" + port + ", password=" + password;
             if(tlssecure)
             {
@@ -2303,6 +2353,12 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
 
     for(Proxy &x : nodes)
     {
+        if((x.Type == ProxyType::Shadowsocks || x.Type == ProxyType::Hysteria2) && !anyTLSTextSafe(x))
+        {
+            warnProxyConversion(x, "Loon", "skipped: value cannot be represented safely in text output");
+            continue;
+        }
+
         if(!x.UnderlyingProxy.empty())
         {
             warnProxyConversion(x, "Loon", "skipped: dialer-proxy cannot be preserved by this output");
@@ -2409,6 +2465,11 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
             proxy += ", peers=[{" + generatePeer(x, true) + "}]";
             break;
         case ProxyType::Hysteria2:
+            if(!x.Ports.empty() || !x.OBFS.empty() || (!x.Fingerprint.empty() && scv.get()))
+            {
+                warnProxyConversion(x, "Loon", "skipped: HY2 hopping, obfs or insecure pin cannot be preserved");
+                continue;
+            }
             proxy = "hysteria2," + hostname + "," + port + ",\"" + password + "\"";
 
             if(!scv.is_undef())
@@ -2650,6 +2711,8 @@ static rapidjson::Value buildSingBoxHysteria2ServerPorts(const std::string &port
         if (is_single_port)
             port_entry = port_entry + ":" + port_entry;
 
+        std::replace(port_entry.begin(), port_entry.end(), '-', ':');
+
         result.PushBack(rapidjson::Value(port_entry.c_str(), allocator), allocator);
     }
     return result;
@@ -2801,6 +2864,11 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
             }
             case ProxyType::Hysteria2:
             {
+                if(!x.Fingerprint.empty())
+                {
+                    warnProxyConversion(x, "sing-box", "skipped: whole-certificate pin needs a version-specific TLS mapping");
+                    continue;
+                }
                 addSingBoxCommonMembers(proxy, x, "hysteria2", allocator);
                 if (!x.Ports.empty())
                     proxy.AddMember("server_ports", buildSingBoxHysteria2ServerPorts(x.Ports, allocator), allocator);

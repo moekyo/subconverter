@@ -54,9 +54,30 @@ inline bool number(const std::string &text, uint32_t &value, uint32_t limit = UI
     return true;
 }
 
+inline bool portRanges(const std::string &text, uint32_t &first)
+{
+    if(text.empty()) return false;
+    bool initial = true;
+    size_t start = 0;
+    while(start < text.size())
+    {
+        auto end = text.find(',', start);
+        if(end == std::string::npos) end = text.size();
+        const auto part = text.substr(start, end - start);
+        const auto dash = part.find('-');
+        uint32_t low = 0, high = 0;
+        if(!number(part.substr(0, dash), low, 65535) || low == 0) return false;
+        if(dash != std::string::npos && (!number(part.substr(dash + 1), high, 65535) || high < low)) return false;
+        if(initial) { first = low; initial = false; }
+        if(end == text.size()) return true;
+        start = end + 1;
+    }
+    return false; // trailing comma
+}
+
 struct Link
 {
-    std::string userinfo, raw_userinfo, server, port, remark;
+    std::string userinfo, raw_userinfo, server, port, ports, remark;
     std::map<std::string, std::string> query;
 
     std::string get(const std::string &key) const
@@ -76,7 +97,7 @@ struct Link
     }
 };
 
-inline bool parse(const std::string &input, const std::string &scheme, Link &out, const std::string &default_port = "")
+inline bool parse(const std::string &input, const std::string &scheme, Link &out, const std::string &default_port = "", bool allow_port_ranges = false, bool allow_empty_auth = false)
 {
     const std::string prefix = scheme + "://";
     if(input.compare(0, prefix.size(), prefix) != 0) return false;
@@ -109,10 +130,17 @@ inline bool parse(const std::string &input, const std::string &scheme, Link &out
     }
     if(!authority.empty() && authority.back() == '/') authority.pop_back();
     p = authority.find('@');
-    if(p == std::string::npos || authority.find('@', p + 1) != std::string::npos) return false;
-    out.raw_userinfo = authority.substr(0, p);
-    if(!decode(out.raw_userinfo, out.userinfo) || out.userinfo.empty()) return false;
-    authority.erase(0, p + 1);
+    if(p == std::string::npos)
+    {
+        if(!allow_empty_auth) return false;
+    }
+    else
+    {
+        if(authority.find('@', p + 1) != std::string::npos) return false;
+        out.raw_userinfo = authority.substr(0, p);
+        if(!decode(out.raw_userinfo, out.userinfo) || (out.userinfo.empty() && !allow_empty_auth)) return false;
+        authority.erase(0, p + 1);
+    }
     if(authority.empty()) return false;
     if(authority[0] == '[')
     {
@@ -133,7 +161,13 @@ inline bool parse(const std::string &input, const std::string &scheme, Link &out
         })) return false;
     }
     uint32_t port = 0;
-    if(!number(out.port, port, 65535) || port == 0) return false;
+    if(allow_port_ranges && out.port.find_first_of(",-") != std::string::npos)
+    {
+        if(!portRanges(out.port, port)) return false;
+        out.ports = out.port;
+        out.port = std::to_string(port);
+    }
+    else if(!number(out.port, port, 65535) || port == 0) return false;
     if(out.remark.empty()) out.remark = out.server + ":" + out.port;
     return true;
 }

@@ -26,6 +26,8 @@ int main(int argc, char **argv)
         else if(target == "mellow") std::cout << proxyToMellow(nodes, "[Endpoint]\n", rules, {}, ext);
         else if(target == "singbox") std::cout << proxyToSingBox(nodes, "{}", rules, {}, ext);
         else if(target == "mixed") std::cout << proxyToSingle(nodes, 15, ext);
+        else if(target == "ss-uri") std::cout << proxyToSingle(nodes, 1, ext);
+        else if(target == "ssr-uri") std::cout << proxyToSingle(nodes, 2, ext);
         else return 1;
     } catch(const std::exception &) {
         // Do not print input, credentials, or exception strings containing them.

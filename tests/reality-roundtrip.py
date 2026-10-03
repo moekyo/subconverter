@@ -38,8 +38,7 @@ def projection(document):
 
 
 expected = copy.deepcopy(projection(fixture))
-# The existing HY2 parser does not carry the optional udp flag through conversion.
-expected["VPS-HY2"].pop("udp")
+# HY2 optional udp is now preserved, including explicit false in the broader suite.
 for style in ("block", "flow"):
     for mode in ("full", "list"):
         output = subprocess.run(
@@ -50,4 +49,4 @@ for style in ("block", "flow"):
         assert projection(parsed) == expected, (style, mode, parsed)
         reparsed = yaml.safe_load(yaml.safe_dump(parsed))
         assert projection(reparsed) == expected, (style, mode, reparsed)
-        print(f"REALITY round-trip {style}/{mode}: PASS (deadbeef, 00001234, 12345678; HY2 unchanged)")
+        print(f"REALITY round-trip {style}/{mode}: PASS (deadbeef, 00001234, 12345678; HY2 UDP preserved)")
