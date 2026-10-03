@@ -1,5 +1,6 @@
 #include <string>
 #include <map>
+#include <set>
 
 #include "utils/base64/base64.h"
 #include "utils/ini_reader/ini_reader.h"
@@ -1140,12 +1141,73 @@ static bool readOptionalClashUInt(const YAML::Node &proxy, const char *key, std:
     return true;
 }
 
+static const string_array tuicStringKeys = {"token", "uuid", "password", "ip", "sni", "congestion-controller",
+    "udp-relay-mode", "fingerprint", "name-cert-verify", "certificate", "private-key", "bbr-profile"};
+static const string_array tuicIntegerKeys = {"heartbeat-interval", "request-timeout", "max-udp-relay-packet-size",
+    "max-open-streams", "cwnd", "recv-window-conn", "recv-window", "max-datagram-frame-size", "udp-over-stream-version"};
+static const string_array tuicBooleanKeys = {"disable-sni", "reduce-rtt", "fast-open", "disable-mtu-discovery", "udp-over-stream"};
+
+static bool parseTuicOptions(const YAML::Node &input, Proxy &node)
+{
+    const string_array common = {"name", "type", "server", "port", "udp", "tfo", "skip-cert-verify", "alpn", "dialer-proxy", "underlying-proxy"};
+    for(const auto &entry : input)
+    {
+        const auto key = entry.first.as<std::string>();
+        const auto &value = entry.second;
+        if(std::find(tuicStringKeys.begin(), tuicStringKeys.end(), key) != tuicStringKeys.end())
+        {
+            if(!value.IsScalar()) return false;
+            node.Tuic.Strings[key] = value.as<std::string>();
+        }
+        else if(std::find(tuicIntegerKeys.begin(), tuicIntegerKeys.end(), key) != tuicIntegerKeys.end())
+        {
+            uint32_t number = 0;
+            if(!value.IsScalar() || !share_uri::number(value.as<std::string>(), number, INT32_MAX)) return false;
+            node.Tuic.Integers[key] = number;
+        }
+        else if(std::find(tuicBooleanKeys.begin(), tuicBooleanKeys.end(), key) != tuicBooleanKeys.end())
+        {
+            if(!value.IsScalar()) return false;
+            const auto text = value.as<std::string>();
+            if(text != "true" && text != "false") return false;
+            node.Tuic.Booleans[key] = text == "true";
+        }
+        else if(std::find(common.begin(), common.end(), key) == common.end()) return false;
+    }
+    const auto &strings = node.Tuic.Strings;
+    auto has = [&](const char *key) { return strings.find(key) != strings.end(); };
+    auto get = [&](const char *key) { auto p = strings.find(key); return p == strings.end() ? std::string() : p->second; };
+    if(has("token"))
+    {
+        if(get("token").empty() || has("uuid") || has("password")) return false;
+    }
+    else if(!has("password") || !regMatch(get("uuid"), "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")) return false;
+    if(has("udp-relay-mode") && get("udp-relay-mode") != "native" && get("udp-relay-mode") != "quic") return false;
+    if(has("congestion-controller") && get("congestion-controller") != "cubic" && get("congestion-controller") != "new_reno" && get("congestion-controller") != "bbr") return false;
+    if(node.Tuic.Integers.count("udp-over-stream-version") && node.Tuic.Integers.at("udp-over-stream-version") > 2) return false;
+    if(input["alpn"].IsDefined())
+    {
+        if(!input["alpn"].IsSequence()) return false;
+        for(const auto &item : input["alpn"])
+        {
+            if(!item.IsScalar()) return false;
+            node.Alpn.push_back(item.as<std::string>());
+        }
+        node.AlpnSpecified = true;
+    }
+    for(const char *key : {"udp", "tfo", "skip-cert-verify"})
+        if(input[key].IsDefined() && (!input[key].IsScalar() || (input[key].as<std::string>() != "true" && input[key].as<std::string>() != "false"))) return false;
+    return true;
+}
+
 void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
 {
     uint32_t index = nodes.size();
     const std::string section = yamlnode["proxies"].IsDefined() ? "proxies" : "Proxy";
     for(uint32_t i = 0; i < yamlnode[section].size(); i++)
     {
+        try
+        {
         std::string proxytype, ps, server, port, cipher, group, password, underlying_proxy; //common
         std::string type = "none", id, aid = "0", net = "tcp", path, host, edge, tls, sni; //vmess
         std::string plugin, pluginopts, pluginopts_mode, pluginopts_host, pluginopts_mux; //ss
@@ -1170,6 +1232,20 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
         udp = safe_as<std::string>(singleproxy["udp"]);
         tfo = safe_as<std::string>(singleproxy["tfo"].IsDefined() ? singleproxy["tfo"] : singleproxy["fast-open"]);
         scv = safe_as<std::string>(singleproxy["skip-cert-verify"]);
+        if(proxytype == "anytls" || proxytype == "vless")
+        {
+            // Unsupported security settings cannot safely disappear from a node.
+            bool unsupported = false;
+            for(const char *key : {"ech-opts", "shadow-tls-opts", "restls-opts", "jls-opts", "certificate", "private-key", "name-cert-verify", "client-metadata", "smux", "packet-addr", "xudp", "disable-reuse"})
+                unsupported = unsupported || singleproxy[key].IsDefined();
+            if(proxytype == "anytls" && singleproxy["reality-opts"].IsDefined()) unsupported = true;
+            if(proxytype == "vless" && singleproxy["encryption"].IsDefined() && !safe_as<std::string>(singleproxy["encryption"]).empty() && safe_as<std::string>(singleproxy["encryption"]) != "none") unsupported = true;
+            if(unsupported)
+            {
+                writeLog(0, "Skipped modern Clash node: unsupported security or multiplexing option (content redacted)", LOG_LEVEL_WARNING);
+                continue;
+            }
+        }
         switch(hash_(proxytype))
         {
         case "vmess"_hash:
@@ -1235,6 +1311,8 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
             {
                 singleproxy["reality-opts"]["public-key"] >>= public_key_value;
                 singleproxy["reality-opts"]["short-id"] >>= short_id_value;
+                if(singleproxy["reality-opts"]["support-x25519mlkem768"].IsDefined())
+                    node.RealitySupportX25519MLKEM768 = singleproxy["reality-opts"]["support-x25519mlkem768"].as<bool>();
                 tlssecure = true;
             }
 
@@ -1268,7 +1346,11 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
             }
 
             vlessConstruct(node, group, ps, server, port, id, flow, vless_net, vless_path, vless_host, tlssecure, vless_sni, fingerprint_value, public_key_value, short_id_value, udp, tfo, scv, underlying_proxy);
-            if(singleproxy["alpn"].IsSequence()) singleproxy["alpn"] >>= node.Alpn;
+            if(singleproxy["alpn"].IsSequence())
+            {
+                singleproxy["alpn"] >>= node.Alpn;
+                node.AlpnSpecified = true;
+            }
             singleproxy["packet-encoding"] >>= node.PacketEncoding;
             singleproxy["fingerprint"] >>= node.CertificateFingerprint;
             break;
@@ -1475,6 +1557,20 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
 
             hysteria2Construct(node, group, ps, server, port, ports, up, down, password, obfs, obfs_password, sni, fingerprint, alpn, ca, ca_str, cwnd, hop_interval, tfo, scv, underlying_proxy);
             break;
+        case "tuic"_hash:
+        {
+            uint32_t port_number = 0;
+            if(server.empty() || !share_uri::number(port, port_number, 65535) || port_number == 0 || !parseTuicOptions(singleproxy, node))
+            {
+                writeLog(0, "Skipped TUIC node: invalid or unsupported option (content redacted)", LOG_LEVEL_WARNING);
+                continue;
+            }
+            // TUIC fast-open is a QUIC option; it must not become TCP tfo.
+            tfo = safe_as<std::string>(singleproxy["tfo"]);
+            commonConstruct(node, ProxyType::TUIC, TUIC_DEFAULT_GROUP, ps, server, port, udp, tfo, scv, tribool(), underlying_proxy);
+            node.TLSSecure = true;
+            break;
+        }
         case "anytls"_hash:
             group = ANYTLS_DEFAULT_GROUP;
             singleproxy["password"] >>= password;
@@ -1484,7 +1580,10 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
             singleproxy["client-fingerprint"] >>= node.ClientFingerprint;
             singleproxy["fingerprint"] >>= node.Fingerprint;
             if(singleproxy["alpn"].IsSequence())
+            {
                 singleproxy["alpn"] >>= node.Alpn;
+                node.AlpnSpecified = true;
+            }
             else if(singleproxy["alpn"].IsDefined())
                 node.Alpn = split(safe_as<std::string>(singleproxy["alpn"]), ",");
             if(!readOptionalClashUInt(singleproxy, "idle-session-check-interval", node.IdleSessionCheckInterval) ||
@@ -1496,12 +1595,18 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
             }
             break;
         default:
+            writeLog(0, "Skipped unsupported Clash protocol (content redacted)", LOG_LEVEL_WARNING);
             continue;
         }
 
         node.Id = index;
         nodes.emplace_back(std::move(node));
         index++;
+        }
+        catch(const YAML::Exception &)
+        {
+            writeLog(0, "Skipped malformed Clash node (content redacted)", LOG_LEVEL_WARNING);
+        }
     }
 }
 
@@ -1523,6 +1628,8 @@ void explodeVless(const std::string &uri, Proxy &node)
     if(!encryption.empty() && encryption != "none") return;
     auto network = link.get("type");
     if(network.empty()) network = "tcp";
+    // Xray share links call HTTP/2 "http"; Mihomo calls that transport "h2".
+    if(network == "http") network = "h2";
     const auto security = link.get("security");
     if(!security.empty() && security != "none" && security != "tls" && security != "reality") return;
     const bool tls = security == "tls" || security == "reality";
@@ -1554,7 +1661,9 @@ void explodeVless(const std::string &uri, Proxy &node)
     else if(network != "ws" && network != "grpc" && network != "h2" && network != "http") return;
     if(host.find(',') != std::string::npos) return;
     vlessConstruct(node, V2RAY_DEFAULT_GROUP, link.remark, link.server, link.port, link.userinfo,
-        flow, network, path, host, tls, link.get("sni"), link.get("fp"), pbk, sid, udp, tfo, scv, "");
+        flow, network, path, host, tls,
+        tls && link.get("sni").empty() ? link.server : link.get("sni"),
+        tls && link.get("fp").empty() ? "chrome" : link.get("fp"), pbk, sid, udp, tfo, scv, "");
     node.PacketEncoding = packet;
     if(!link.get("alpn").empty()) node.Alpn = split(link.get("alpn"), ",");
 }
@@ -1744,6 +1853,54 @@ void explodeHysteria2(std::string hysteria2, Proxy &node) {
         explodeStdHysteria2(hysteria2, node);
         return;
     }
+}
+
+void explodeTuic(const std::string &uri, Proxy &node)
+{
+    share_uri::Link link;
+    if(!share_uri::parse(uri, "tuic", link)) return;
+    YAML::Node config;
+    config["name"] = link.remark;
+    config["type"] = "tuic";
+    config["server"] = link.server;
+    config["port"] = link.port;
+    const auto colon = link.raw_userinfo.find(':');
+    if(colon != std::string::npos)
+    {
+        std::string uuid, password;
+        if(!share_uri::decode(link.raw_userinfo.substr(0, colon), uuid) ||
+           !share_uri::decode(link.raw_userinfo.substr(colon + 1), password)) return;
+        config["uuid"] = uuid;
+        config["password"] = password;
+    }
+    else config["token"] = link.userinfo;
+    const std::map<std::string, std::string> aliases = {
+        {"congestion_control", "congestion-controller"}, {"udp_relay_mode", "udp-relay-mode"},
+        {"disable_sni", "disable-sni"}, {"reduce_rtt", "reduce-rtt"},
+        {"allow_insecure", "skip-cert-verify"}, {"insecure", "skip-cert-verify"}, {"underlying-proxy", "dialer-proxy"}};
+    std::set<std::string> seen;
+    for(const auto &entry : link.query)
+    {
+        auto alias = aliases.find(entry.first);
+        const auto key = alias == aliases.end() ? entry.first : alias->second;
+        if(!seen.insert(key).second || key == "token" || key == "uuid" || key == "password" ||
+           key == "name" || key == "type" || key == "server" || key == "port") return;
+        if(key == "alpn")
+        {
+            config[key] = split(entry.second, ",");
+        }
+        else if(std::find(tuicBooleanKeys.begin(), tuicBooleanKeys.end(), key) != tuicBooleanKeys.end() || key == "udp" || key == "tfo" || key == "skip-cert-verify")
+        {
+            tribool value;
+            if(!link.boolean(entry.first, value)) return;
+            config[key] = value.get();
+        }
+        else config[key] = entry.second;
+    }
+    if(!parseTuicOptions(config, node)) return;
+    const tribool udp(safe_as<std::string>(config["udp"])), tfo(safe_as<std::string>(config["tfo"])), scv(safe_as<std::string>(config["skip-cert-verify"]));
+    commonConstruct(node, ProxyType::TUIC, TUIC_DEFAULT_GROUP, link.remark, link.server, link.port, udp, tfo, scv, tribool(), safe_as<std::string>(config["dialer-proxy"]));
+    node.TLSSecure = true;
 }
 
 void explodeAnyTLS(std::string anytls, Proxy &node)
@@ -2729,6 +2886,8 @@ void explode(const std::string &link, Proxy &node)
         explodeHTTP(link, node);
     else if(startsWith(link, "Netch://"))
         explodeNetch(link, node);
+    else if(startsWith(link, "tuic://"))
+        explodeTuic(link, node);
     else if(startsWith(link, "vless://"))
         explodeVless(link, node);
     else if(startsWith(link, "trojan://"))

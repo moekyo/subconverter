@@ -4,6 +4,7 @@
 #include <cmath>
 #include <climits>
 #include <cctype>
+#include <set>
 
 #include "config/regmatch.h"
 #include "generator/config/subexport.h"
@@ -34,6 +35,47 @@ static void warnProxyConversion(const Proxy &node, const char *target, const cha
 {
     writeLog(0, getProxyTypeName(node.Type) + " -> " + target + ": " + reason, LOG_LEVEL_WARNING);
 }
+
+// Track source identities before target-specific renaming and filtering. A
+// dependent may not survive if its explicitly referenced source node was lost.
+// References to pre-existing base groups (not source node names) are untouched.
+struct ExportChains
+{
+    std::map<std::string, size_t> source_counts;
+    std::vector<std::string> emitted, emitted_dependencies;
+    explicit ExportChains(const std::vector<Proxy> &nodes)
+    {
+        for(const auto &node : nodes) ++source_counts[node.Remark];
+    }
+    std::vector<size_t> rejected(const char *target) const
+    {
+        std::map<std::string, size_t> available;
+        for(const auto &name : emitted) ++available[name];
+        std::vector<bool> rejected(emitted.size(), false);
+        bool changed;
+        do {
+            changed = false;
+            for(size_t i = 0; i < emitted.size(); ++i)
+            {
+                const auto &dependency = emitted_dependencies[i];
+                const auto source = source_counts.find(dependency);
+                if(!rejected[i] && source != source_counts.end() &&
+                   (source->second > 1 || available[dependency] == 0))
+                {
+                    rejected[i] = true;
+                    --available[emitted[i]];
+                    changed = true;
+                }
+            }
+        } while(changed);
+        std::vector<size_t> indexes;
+        for(size_t i = 0; i < emitted.size(); ++i)
+            if(rejected[i]) indexes.push_back(i);
+        if(!indexes.empty())
+            writeLog(0, std::string(target) + " skipped " + std::to_string(indexes.size()) + " dependent nodes: source chain target was omitted or ambiguous", LOG_LEVEL_WARNING);
+        return indexes;
+    }
+};
 
 static bool anyTLSTextSafe(const Proxy &node)
 {
@@ -145,7 +187,9 @@ bool applyMatcher(const std::string &rule, std::string &real_rule, const Proxy &
         {ProxyType::SOCKS5,       "SOCKS5"},
         {ProxyType::WireGuard,    "WIREGUARD"},
         {ProxyType::Hysteria,     "HYSTERIA"},
-        {ProxyType::Hysteria2,    "HYSTERIA2"}
+        {ProxyType::Hysteria2,    "HYSTERIA2"},
+        {ProxyType::AnyTLS,       "ANYTLS"},
+        {ProxyType::TUIC,         "TUIC"}
     };
     if(startsWith(rule, "!!GROUP="))
     {
@@ -251,6 +295,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
     YAML::Node proxies, original_groups;
     std::vector<Proxy> nodelist;
     string_array remarks_list;
+    ExportChains chains(nodes);
+    std::map<std::string, std::string> emitted_names;
     /// proxies style
     bool proxy_block = false, proxy_compact = false, group_block = false, group_compact = false;
     switch(hash_(ext.clash_proxies_style))
@@ -280,6 +326,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
 
     for(Proxy &x : nodes)
     {
+        const auto original_name = x.Remark;
         YAML::Node singleproxy;
 
         std::string type = getProxyTypeName(x.Type);
@@ -399,7 +446,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["servername"] = x.ServerName;
             if(!x.Fingerprint.empty())
                 singleproxy["client-fingerprint"] = x.Fingerprint;
-            if(!x.Alpn.empty())
+            if(!x.Alpn.empty() || x.AlpnSpecified)
                 singleproxy["alpn"] = x.Alpn;
             if(!x.PacketEncoding.empty())
                 singleproxy["packet-encoding"] = x.PacketEncoding;
@@ -414,6 +461,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 // Explicit string tags avoid relying on YAML emitter/parser type inference.
                 singleproxy["reality-opts"]["public-key"] = x.PublicKey;
                 singleproxy["reality-opts"]["public-key"].SetTag("tag:yaml.org,2002:str");
+                if(!x.RealitySupportX25519MLKEM768.is_undef())
+                    singleproxy["reality-opts"]["support-x25519mlkem768"] = x.RealitySupportX25519MLKEM768.get();
                 if(!x.ShortId.empty())
                 {
                     singleproxy["reality-opts"]["short-id"] = x.ShortId;
@@ -641,6 +690,18 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             if (x.HopInterval)
                 singleproxy["hop-interval"] = x.HopInterval;
             break;
+        case ProxyType::TUIC:
+            singleproxy["type"] = "tuic";
+            for(const auto &option : x.Tuic.Strings)
+            {
+                singleproxy[option.first] = option.second;
+                singleproxy[option.first].SetTag("tag:yaml.org,2002:str");
+            }
+            for(const auto &option : x.Tuic.Integers) singleproxy[option.first] = option.second;
+            for(const auto &option : x.Tuic.Booleans) singleproxy[option.first] = option.second;
+            if(!x.Alpn.empty() || x.AlpnSpecified) singleproxy["alpn"] = x.Alpn;
+            if(!scv.is_undef()) singleproxy["skip-cert-verify"] = scv.get();
+            break;
         case ProxyType::AnyTLS:
             singleproxy["type"] = "anytls";
             singleproxy["password"] = x.Password;
@@ -652,8 +713,11 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             if(!x.ClientFingerprint.empty())
                 singleproxy["client-fingerprint"] = x.ClientFingerprint;
             if(!x.Fingerprint.empty())
+            {
                 singleproxy["fingerprint"] = x.Fingerprint;
-            if(!x.Alpn.empty())
+                singleproxy["fingerprint"].SetTag("tag:yaml.org,2002:str");
+            }
+            if(!x.Alpn.empty() || x.AlpnSpecified)
                 singleproxy["alpn"] = x.Alpn;
             if(x.IdleSessionCheckInterval)
                 singleproxy["idle-session-check-interval"] = *x.IdleSessionCheckInterval;
@@ -663,8 +727,12 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["min-idle-session"] = *x.MinIdleSession;
             break;
         default:
+                warnProxyConversion(x, "Clash", "skipped: unsupported protocol for this output target");
             continue;
         }
+
+        if((x.Type == ProxyType::AnyTLS || x.Type == ProxyType::VLESS || x.Type == ProxyType::TUIC) && singleproxy["alpn"].IsSequence())
+            for(auto item : singleproxy["alpn"]) item.SetTag("tag:yaml.org,2002:str");
 
         // UDP is not supported yet in clash using snell
         // sees in https://dreamacro.github.io/clash/configuration/outbound.html#snell
@@ -678,9 +746,30 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             singleproxy.SetStyle(YAML::EmitterStyle::Block);
         else
             singleproxy.SetStyle(YAML::EmitterStyle::Flow);
+        emitted_names.emplace(original_name, x.Remark);
         proxies.push_back(singleproxy);
+        chains.emitted.push_back(original_name);
+        chains.emitted_dependencies.push_back(x.UnderlyingProxy);
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
+    }
+    for(auto rejected = chains.rejected("Clash"); !rejected.empty(); rejected.pop_back())
+    {
+        const auto index = rejected.back();
+        proxies.remove(index);
+        nodelist.erase(nodelist.begin() + index);
+        remarks_list.erase(remarks_list.begin() + index);
+        emitted_names.erase(chains.emitted[index]);
+    }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Clash omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
+
+    for(auto proxy : proxies)
+    {
+        if(!proxy["dialer-proxy"].IsDefined()) continue;
+        const auto found = emitted_names.find(proxy["dialer-proxy"].as<std::string>());
+        if(found != emitted_names.end()) proxy["dialer-proxy"] = found->second;
     }
 
     if(proxy_compact)
@@ -875,6 +964,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
     std::vector<Proxy> nodelist;
     unsigned short local_port = 1080;
     string_array remarks_list;
+    ExportChains chains(nodes);
+    std::vector<std::string> generated_lines;
 
     ini.store_any_line = true;
     // filter out sections that requires direct-save
@@ -898,6 +989,13 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
 
     for(Proxy &x : nodes)
     {
+        const auto original_name = x.Remark;
+        if(!x.UnderlyingProxy.empty() && (ext.append_proxy_type || x.UnderlyingProxy.find_first_of(",=\"\\\r\n") != std::string::npos))
+        {
+            warnProxyConversion(x, "Surge", "skipped: chain reference needs unsupported name normalization");
+            continue;
+        }
+
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -1104,6 +1202,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
                 proxy += ",skip-cert-verify=" + scv.get_str();
             break;
         default:
+                warnProxyConversion(x, "Surge", "skipped: unsupported protocol for this output target");
             continue;
         }
 
@@ -1122,8 +1221,31 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
             ini.set("{NONAME}", x.Remark + " = " + proxy);
             nodelist.emplace_back(x);
         }
+        chains.emitted.push_back(original_name);
+        chains.emitted_dependencies.push_back(x.UnderlyingProxy);
+        generated_lines.push_back(x.Remark + " = " + proxy);
         remarks_list.emplace_back(x.Remark);
     }
+    const auto rejected = chains.rejected("Surge");
+    if(!rejected.empty())
+    {
+        for(auto it = rejected.rbegin(); it != rejected.rend(); ++it)
+        {
+            generated_lines.erase(generated_lines.begin() + *it);
+            remarks_list.erase(remarks_list.begin() + *it);
+            if(!ext.nodelist) nodelist.erase(nodelist.begin() + *it);
+        }
+        output_nodelist.clear();
+        ini.set_current_section("Proxy");
+        ini.erase_section();
+        ini.set("{NONAME}", "DIRECT = direct");
+        for(const auto &line : generated_lines)
+            if(ext.nodelist) output_nodelist += line + "\n";
+            else ini.set("{NONAME}", line);
+    }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Surge omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(ext.nodelist)
         return output_nodelist;
@@ -1220,6 +1342,11 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
 
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "mixed", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         std::string remark = x.Remark;
         std::string &hostname = x.Hostname, &password = x.Password, &method = x.EncryptMethod, &plugin = x.Plugin, &pluginopts = x.PluginOption, &protocol = x.Protocol, &protoparam = x.ProtocolParam, &obfs = x.OBFS, &obfsparam = x.OBFSParam, &id = x.UserId, &transproto = x.TransferProtocol, &host = x.Host, &path = x.Path, &faketype = x.FakeType;
         bool &tlssecure = x.TLSSecure;
@@ -1282,6 +1409,7 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
             proxyStr += "#" + urlEncode(remark);
             break;
         default:
+                warnProxyConversion(x, "mixed", "skipped: unsupported protocol for this output target");
             continue;
         }
         allLinks += proxyStr + "\n";
@@ -1310,6 +1438,11 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes, extra
     rapidjson::Value proxies(rapidjson::kArrayType);
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "SS JSON", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         std::string &remark = x.Remark;
         std::string &hostname = x.Hostname;
         std::string &password = x.Password;
@@ -1380,6 +1513,11 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini, std::vector<RulesetC
     ini.erase_section();
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "Quantumult", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -1494,6 +1632,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini, std::vector<RulesetC
                 proxyStr = "socks://" + urlSafeBase64Encode(proxyStr);
             break;
         default:
+                warnProxyConversion(x, "Quantumult", "skipped: unsupported protocol for this output target");
             continue;
         }
 
@@ -1501,6 +1640,9 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini, std::vector<RulesetC
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
     }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Quantumult omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(ext.nodelist)
         return;
@@ -1614,6 +1756,11 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
     ini.erase_section();
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "QuanX", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -1765,6 +1912,7 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
                 warnProxyConversion(x, "QuanX", "ClientHello/ALPN/session options are not exported by this target");
             break;
         default:
+                warnProxyConversion(x, "QuanX", "skipped: unsupported protocol for this output target");
             continue;
         }
         if(!tfo.is_undef())
@@ -1779,6 +1927,9 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
     }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "QuanX omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(ext.nodelist)
         return;
@@ -1905,6 +2056,11 @@ std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group, std::strin
 
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "SSD", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         std::string &hostname = x.Hostname, &password = x.Password, &method = x.EncryptMethod, &plugin = x.Plugin, &pluginopts = x.PluginOption, &protocol = x.Protocol, &obfs = x.OBFS;
 
         switch(x.Type)
@@ -1992,6 +2148,11 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Rulese
 
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "Mellow", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -2054,6 +2215,7 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Rulese
             proxy = x.Remark + ", builtin, http, address=" + hostname + ", port=" + port + ", user=" + username + ", pass=" + password;
             break;
         default:
+                warnProxyConversion(x, "Mellow", "skipped: unsupported protocol for this output target");
             continue;
         }
 
@@ -2061,6 +2223,9 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Rulese
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
     }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Mellow omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     ini.set_current_section("EndpointGroup");
 
@@ -2138,6 +2303,11 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
 
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "Loon", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -2275,6 +2445,7 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                 proxy += ",tls-cert-sha256=" + x.Fingerprint;
             break;
         default:
+                warnProxyConversion(x, "Loon", "skipped: unsupported protocol for this output target");
             continue;
         }
 
@@ -2290,9 +2461,12 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
         {
             ini.set("{NONAME}", x.Remark + " = " + proxy);
             nodelist.emplace_back(x);
-            remarks_list.emplace_back(x.Remark);
         }
+        remarks_list.emplace_back(x.Remark);
     }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Loon omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(ext.nodelist)
         return output_nodelist;
@@ -2487,6 +2661,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
     rapidjson::Value outbounds(rapidjson::kArrayType), route(rapidjson::kArrayType);
     std::vector<Proxy> nodelist;
     string_array remarks_list;
+    ExportChains chains(nodes);
+    std::map<std::string, std::string> emitted_names;
 
     if (!ext.nodelist)
     {
@@ -2500,6 +2676,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
 
     for (Proxy &x : nodes)
     {
+        const auto original_name = x.Remark;
         std::string type = getProxyTypeName(x.Type);
         if (ext.append_proxy_type)
             x.Remark = "[" + type + "] " + x.Remark;
@@ -2681,6 +2858,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
                 break;
             }
             default:
+                warnProxyConversion(x, "sing-box", "skipped: unsupported protocol for this output target");
                 continue;
         }
         if (x.TLSSecure)
@@ -2727,8 +2905,30 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
         if(!x.UnderlyingProxy.empty())
             proxy.AddMember("detour", rapidjson::StringRef(x.UnderlyingProxy.c_str()), allocator);
         nodelist.push_back(x);
+        chains.emitted.push_back(original_name);
+        chains.emitted_dependencies.push_back(x.UnderlyingProxy);
         remarks_list.emplace_back(x.Remark);
+        emitted_names.emplace(original_name, x.Remark);
         outbounds.PushBack(proxy, allocator);
+    }
+    for(auto rejected = chains.rejected("sing-box"); !rejected.empty(); rejected.pop_back())
+    {
+        const auto index = rejected.back();
+        const size_t prefix = ext.nodelist ? 0 : 3;
+        outbounds.Erase(outbounds.Begin() + prefix + index);
+        nodelist.erase(nodelist.begin() + index);
+        remarks_list.erase(remarks_list.begin() + index);
+        emitted_names.erase(chains.emitted[index]);
+    }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "sing-box omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
+
+    for(auto &proxy : outbounds.GetArray())
+    {
+        if(!proxy.HasMember("detour")) continue;
+        const auto found = emitted_names.find(proxy["detour"].GetString());
+        if(found != emitted_names.end()) proxy["detour"].SetString(found->second.c_str(), allocator);
     }
 
     if (ext.nodelist)

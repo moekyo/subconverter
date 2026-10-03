@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <map>
 
 #include "utils/tribool.h"
 
@@ -26,6 +27,7 @@ enum class ProxyType
     Hysteria2,
     AnyTLS,
     VLESS,
+    TUIC,
 };
 
 inline String getProxyTypeName(ProxyType type)
@@ -58,10 +60,21 @@ inline String getProxyTypeName(ProxyType type)
         return "AnyTLS";
     case ProxyType::VLESS:
         return "VLESS";
+    case ProxyType::TUIC:
+        return "TUIC";
     default:
         return "Unknown";
     }
 }
+
+// Mihomo-specific TUIC options are typed and explicitly allowlisted by the parser.
+// An absent option stays absent, so the client keeps its own versioned defaults.
+struct TuicOptions
+{
+    std::map<String, String> Strings;
+    std::map<String, uint32_t> Integers;
+    std::map<String, bool> Booleans;
+};
 
 struct Proxy
 {
@@ -90,6 +103,7 @@ struct Proxy
     String ShortId;
     String PacketEncoding;
     String CertificateFingerprint;
+    tribool RealitySupportX25519MLKEM768;
     bool TLSSecure = false;
 
     String Host;
@@ -123,9 +137,9 @@ struct Proxy
 
     String Ports;
     String Up;
-    uint32_t UpSpeed;
+    uint32_t UpSpeed = 0;
     String Down;
-    uint32_t DownSpeed;
+    uint32_t DownSpeed = 0;
     String AuthStr;
     String SNI;
     String Fingerprint;
@@ -136,11 +150,13 @@ struct Proxy
     std::optional<uint32_t> MinIdleSession;
     String Ca;
     String CaStr;
-    uint32_t RecvWindowConn;
-    uint32_t RecvWindow;
+    uint32_t RecvWindowConn = 0;
+    uint32_t RecvWindow = 0;
     tribool DisableMtuDiscovery;
-    uint32_t HopInterval;
+    uint32_t HopInterval = 0;
     StringArray Alpn;
+    bool AlpnSpecified = false;
+    TuicOptions Tuic;
 
     uint32_t CWND = 0;
 };
@@ -156,5 +172,6 @@ struct Proxy
 #define HYSTERIA_DEFAULT_GROUP "HysteriaProvider"
 #define HYSTERIA2_DEFAULT_GROUP "Hysteria2Provider"
 #define ANYTLS_DEFAULT_GROUP "AnyTLSProvider"
+#define TUIC_DEFAULT_GROUP "TUICProvider"
 
 #endif // PROXY_H_INCLUDED

@@ -56,7 +56,7 @@ inline bool number(const std::string &text, uint32_t &value, uint32_t limit = UI
 
 struct Link
 {
-    std::string userinfo, server, port, remark;
+    std::string userinfo, raw_userinfo, server, port, remark;
     std::map<std::string, std::string> query;
 
     std::string get(const std::string &key) const
@@ -110,7 +110,8 @@ inline bool parse(const std::string &input, const std::string &scheme, Link &out
     if(!authority.empty() && authority.back() == '/') authority.pop_back();
     p = authority.find('@');
     if(p == std::string::npos || authority.find('@', p + 1) != std::string::npos) return false;
-    if(!decode(authority.substr(0, p), out.userinfo) || out.userinfo.empty()) return false;
+    out.raw_userinfo = authority.substr(0, p);
+    if(!decode(out.raw_userinfo, out.userinfo) || out.userinfo.empty()) return false;
     authority.erase(0, p + 1);
     if(authority.empty()) return false;
     if(authority[0] == '[')
