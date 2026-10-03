@@ -399,6 +399,15 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["servername"] = x.ServerName;
             if(!x.Fingerprint.empty())
                 singleproxy["client-fingerprint"] = x.Fingerprint;
+            if(!x.Alpn.empty())
+                singleproxy["alpn"] = x.Alpn;
+            if(!x.PacketEncoding.empty())
+                singleproxy["packet-encoding"] = x.PacketEncoding;
+            if(!x.CertificateFingerprint.empty())
+            {
+                singleproxy["fingerprint"] = x.CertificateFingerprint;
+                singleproxy["fingerprint"].SetTag("tag:yaml.org,2002:str");
+            }
             if(!x.PublicKey.empty())
             {
                 // REALITY short-id is a protocol hex string, not a numeric identifier.

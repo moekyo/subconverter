@@ -88,6 +88,8 @@ struct Proxy
     String FakeType;
     String Flow;
     String ShortId;
+    String PacketEncoding;
+    String CertificateFingerprint;
     bool TLSSecure = false;
 
     String Host;

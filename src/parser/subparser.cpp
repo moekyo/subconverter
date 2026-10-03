@@ -1268,6 +1268,9 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
             }
 
             vlessConstruct(node, group, ps, server, port, id, flow, vless_net, vless_path, vless_host, tlssecure, vless_sni, fingerprint_value, public_key_value, short_id_value, udp, tfo, scv, underlying_proxy);
+            if(singleproxy["alpn"].IsSequence()) singleproxy["alpn"] >>= node.Alpn;
+            singleproxy["packet-encoding"] >>= node.PacketEncoding;
+            singleproxy["fingerprint"] >>= node.CertificateFingerprint;
             break;
         }
         case "ss"_hash:
@@ -1500,6 +1503,60 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
         nodes.emplace_back(std::move(node));
         index++;
     }
+}
+
+void explodeVless(const std::string &uri, Proxy &node)
+{
+    share_uri::Link link;
+    tribool udp, tfo, scv;
+    if(!share_uri::parse(uri, "vless", link) ||
+       !regMatch(link.userinfo, "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$") ||
+       !link.boolean("udp", udp) || !link.boolean("tfo", tfo) || !link.boolean("allowInsecure", scv)) return;
+    tribool insecure;
+    if(!link.boolean("insecure", insecure) || (!scv.is_undef() && !insecure.is_undef() && scv != insecure)) return;
+    scv.define(insecure);
+    const string_array accepted = {"type", "security", "encryption", "flow", "sni", "fp", "pbk", "sid",
+        "host", "path", "serviceName", "mode", "headerType", "alpn", "packet-encoding", "udp", "tfo", "allowInsecure", "insecure"};
+    for(const auto &entry : link.query)
+        if(std::find(accepted.begin(), accepted.end(), entry.first) == accepted.end()) return;
+    const auto encryption = link.get("encryption");
+    if(!encryption.empty() && encryption != "none") return;
+    auto network = link.get("type");
+    if(network.empty()) network = "tcp";
+    const auto security = link.get("security");
+    if(!security.empty() && security != "none" && security != "tls" && security != "reality") return;
+    const bool tls = security == "tls" || security == "reality";
+    if(!link.get("headerType").empty() && link.get("headerType") != "none") return;
+    if(!link.get("mode").empty() && !(network == "grpc" && link.get("mode") == "gun")) return;
+    const auto flow = link.get("flow");
+    if(!flow.empty() && (flow != "xtls-rprx-vision" || network != "tcp" || !tls)) return;
+    const auto pbk = link.get("pbk"), sid = link.get("sid");
+    if(security == "reality")
+    {
+        if(!regMatch(pbk, "^[A-Za-z0-9_-]{43}$") || sid.size() > 16 || sid.size() % 2 ||
+           !std::all_of(sid.begin(), sid.end(), [](unsigned char c) { return share_uri::hex(c) >= 0; })) return;
+    }
+    else if(!pbk.empty() || !sid.empty()) return;
+    if(!tls && (!link.get("sni").empty() || !link.get("fp").empty() || !link.get("alpn").empty() || !scv.is_undef())) return;
+    const auto packet = link.get("packet-encoding");
+    if(!packet.empty() && packet != "xudp" && packet != "packetaddr" && packet != "packet") return;
+    std::string path = link.get("path"), host = link.get("host");
+    if(network == "grpc")
+    {
+        if(!path.empty() || !host.empty()) return;
+        path = link.get("serviceName");
+    }
+    else if(!link.get("serviceName").empty()) return;
+    if(network == "tcp")
+    {
+        if(!path.empty() || !host.empty()) return;
+    }
+    else if(network != "ws" && network != "grpc" && network != "h2" && network != "http") return;
+    if(host.find(',') != std::string::npos) return;
+    vlessConstruct(node, V2RAY_DEFAULT_GROUP, link.remark, link.server, link.port, link.userinfo,
+        flow, network, path, host, tls, link.get("sni"), link.get("fp"), pbk, sid, udp, tfo, scv, "");
+    node.PacketEncoding = packet;
+    if(!link.get("alpn").empty()) node.Alpn = split(link.get("alpn"), ",");
 }
 
 void explodeStdVMess(std::string vmess, Proxy &node)
@@ -2672,6 +2729,8 @@ void explode(const std::string &link, Proxy &node)
         explodeHTTP(link, node);
     else if(startsWith(link, "Netch://"))
         explodeNetch(link, node);
+    else if(startsWith(link, "vless://"))
+        explodeVless(link, node);
     else if(startsWith(link, "trojan://"))
         explodeTrojan(link, node);
     else if (strFind(link, "hysteria2://") || strFind(link, "hy2://"))
@@ -2725,7 +2784,10 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes)
     //try to parse as normal subscription
     if(!processed)
     {
-        sub = urlSafeBase64Decode(sub);
+        // A mixed plaintext URI subscription must not be Base64-decoded again.
+        // Unknown schemes remain visible to the unsupported-entry diagnostics.
+        if(!regFind(sub, "[A-Za-z][A-Za-z0-9+.-]*://"))
+            sub = urlSafeBase64Decode(sub);
         if(regFind(sub, "(vmess|shadowsocks|http|trojan)\\s*?="))
         {
             if(explodeSurge(sub, nodes))
@@ -2739,8 +2801,10 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes)
             if(strLink.rfind('\r') != std::string::npos)
                 strLink.erase(strLink.size() - 1);
             explode(strLink, node);
-            if(strLink.empty() || node.Type == ProxyType::Unknown)
+            if(strLink.empty()) continue;
+            if(node.Type == ProxyType::Unknown)
             {
+                writeLog(0, "Skipped invalid or unsupported subscription entry (content redacted)", LOG_LEVEL_WARNING);
                 continue;
             }
             nodes.emplace_back(std::move(node));

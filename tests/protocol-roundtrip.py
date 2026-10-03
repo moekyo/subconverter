@@ -153,5 +153,50 @@ class AnyTLSContracts(unittest.TestCase):
         self.assertEqual(together["proxies"], alone)
 
 
+class VlessURIContracts(unittest.TestCase):
+    UUID = "00000000-0000-4000-8000-000000000001"
+    BASE = "vless://" + UUID + "@[2001:db8::2]:443?"
+
+    def test_reality_raw_and_base64(self):
+        for short_id in ("deadbeef", "00001234", "12345678", ""):
+            uri = self.BASE + "security=reality&pbk=" + "A" * 43 + "&sid=" + short_id + "&flow=xtls-rprx-vision&fp=chrome&sni=tls.example&udp=0&tfo=0&allowInsecure=0&alpn=h2%2Chttp%2F1.1&packet-encoding=xudp#Reality"
+            for encoded in (False, True):
+                for style in ("block", "flow"):
+                    for mode in ("full", "list"):
+                        out, _ = convert(uri, encoded=encoded, style=style, mode=mode)
+                        p = out["proxies"][0]
+                        self.assertEqual(p["uuid"], self.UUID)
+                        self.assertEqual(p["reality-opts"].get("short-id", ""), short_id)
+                        self.assertEqual(p["client-fingerprint"], "chrome")
+                        self.assertEqual(p["alpn"], ["h2", "http/1.1"])
+                        self.assertEqual(p["packet-encoding"], "xudp")
+                        self.assertIs(p["skip-cert-verify"], False)
+                        self.assertIs(p["udp"], False)
+                        self.assertIs(p["tfo"], False)
+                        again, _ = convert(out, style=style, mode=mode)
+                        self.assertEqual(again["proxies"], out["proxies"])
+
+    def test_transport_host_and_sni_remain_distinct(self):
+        uri = self.BASE + "security=tls&type=ws&sni=tls.example&host=ws.example&path=%2Fhello%3Fed%3D2048#WS"
+        p = convert(uri)[0]["proxies"][0]
+        self.assertEqual(p["servername"], "tls.example")
+        self.assertEqual(p["ws-opts"], {"path": "/hello?ed=2048", "headers": {"Host": "ws.example"}})
+        uri = self.BASE + "security=tls&type=grpc&mode=gun&serviceName=hello%2Fworld&sni=tls.example#GRPC"
+        p = convert(uri)[0]["proxies"][0]
+        self.assertEqual(p["grpc-opts"]["grpc-service-name"], "hello/world")
+        p = convert(self.BASE + "encryption=none#TCP")[0]["proxies"][0]
+        self.assertEqual(p["network"], "tcp")
+        self.assertIs(p["tls"], False)
+
+    def test_invalid_and_unsupported_are_diagnosed_without_credentials(self):
+        valid = "anytls://neighbor@proxy.example:443#neighbor"
+        for query in ("type=xhttp", "type=quic", "security=unknown", "encryption=unknown", "security=reality&pbk=bad", "security=tls&ech=secret", "type=tcp&headerType=http", "type=grpc&mode=multi", "security=tls&allowInsecure=0&insecure=1", "security=tls&fp=chrome&fp=firefox"):
+            out, warnings = convert(self.BASE + query + "#rejected" + "\n" + valid)
+            self.assertEqual([p["name"] for p in out["proxies"]], ["neighbor"])
+            self.assertIn("Skipped invalid or unsupported", warnings)
+            self.assertNotIn("neighbor@", warnings)
+            self.assertNotIn(self.UUID, warnings)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
