@@ -23,6 +23,10 @@ converter = (args.converter or root / "build/reality-roundtrip/protocol-convert"
 mihomo = args.mihomo.resolve()
 fixture = yaml.safe_load((root / "tests/fixtures/mixed-airport.yaml").read_text())
 fixture["proxies"].extend([
+    {"name": "SS2022", "type": "ss", "server": "127.0.0.1", "port": 443,
+     "cipher": "2022-blake3-aes-128-gcm", "password": "AAAAAAAAAAAAAAAAAAAAAA=="},
+    {"name": "HY2-hopping", "type": "hysteria2", "server": "127.0.0.1", "port": 443,
+     "ports": "443,20000-20001", "password": "synthetic", "obfs": "salamander", "obfs-password": "synthetic-obfs"},
     {"name": "TUIC-v4", "type": "tuic", "server": "127.0.0.1", "port": 443,
      "token": "synthetic:v4-token", "alpn": [], "reduce-rtt": False, "fast-open": False},
     {"name": "AnyTLS-pin", "type": "anytls", "server": "127.0.0.1", "port": 443,
