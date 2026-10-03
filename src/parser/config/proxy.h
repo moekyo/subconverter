@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <optional>
 
 #include "utils/tribool.h"
 
@@ -126,6 +127,11 @@ struct Proxy
     String AuthStr;
     String SNI;
     String Fingerprint;
+    // Keep certificate pinning distinct from the TLS ClientHello fingerprint.
+    String ClientFingerprint;
+    std::optional<uint32_t> IdleSessionCheckInterval;
+    std::optional<uint32_t> IdleSessionTimeout;
+    std::optional<uint32_t> MinIdleSession;
     String Ca;
     String CaStr;
     uint32_t RecvWindowConn;

@@ -12,6 +12,8 @@
 #include "utils/yamlcpp_extra.h"
 #include "config/proxy.h"
 #include "subparser.h"
+#include "share_uri.h"
+#include "utils/logger.h"
 
 using namespace rapidjson;
 using namespace rapidjson_ext;
@@ -1128,34 +1130,45 @@ void explodeNetch(std::string netch, Proxy &node)
     }
 }
 
+static bool readOptionalClashUInt(const YAML::Node &proxy, const char *key, std::optional<uint32_t> &out)
+{
+    const YAML::Node value = proxy[key];
+    if(!value.IsDefined()) return true;
+    uint32_t parsed = 0;
+    if(!value.IsScalar() || !share_uri::number(value.as<std::string>(), parsed, INT32_MAX)) return false;
+    out = parsed;
+    return true;
+}
+
 void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
 {
-    std::string proxytype, ps, server, port, cipher, group, password, underlying_proxy; //common
-    std::string type = "none", id, aid = "0", net = "tcp", path, host, edge, tls, sni; //vmess
-    std::string plugin, pluginopts, pluginopts_mode, pluginopts_host, pluginopts_mux; //ss
-    std::string protocol, protoparam, obfs, obfsparam; //ssr
-    std::string user; //socks
-    std::string ip, ipv6, private_key, public_key, mtu; //wireguard
-    std::string ports, obfs_protocol, up, up_speed, down, down_speed, auth, auth_str,/* obfs, sni,*/ fingerprint, ca, ca_str, recv_window_conn, recv_window, disable_mtu_discovery, hop_interval, alpn; //hysteria
-    std::string obfs_password, cwnd; //hysteria2
-    string_array dns_server;
-    tribool udp, tfo, scv;
-    Node singleproxy;
     uint32_t index = nodes.size();
     const std::string section = yamlnode["proxies"].IsDefined() ? "proxies" : "Proxy";
     for(uint32_t i = 0; i < yamlnode[section].size(); i++)
     {
+        std::string proxytype, ps, server, port, cipher, group, password, underlying_proxy; //common
+        std::string type = "none", id, aid = "0", net = "tcp", path, host, edge, tls, sni; //vmess
+        std::string plugin, pluginopts, pluginopts_mode, pluginopts_host, pluginopts_mux; //ss
+        std::string protocol, protoparam, obfs, obfsparam; //ssr
+        std::string user; //socks
+        std::string ip, ipv6, private_key, public_key, mtu; //wireguard
+        std::string ports, obfs_protocol, up, up_speed, down, down_speed, auth, auth_str,/* obfs, sni,*/ fingerprint, ca, ca_str, recv_window_conn, recv_window, disable_mtu_discovery, hop_interval, alpn; //hysteria
+        std::string obfs_password, cwnd; //hysteria2
+        string_array dns_server;
+        tribool udp, tfo, scv;
+        Node singleproxy;
         Proxy node;
         singleproxy = yamlnode[section][i];
         singleproxy["type"] >>= proxytype;
         singleproxy["name"] >>= ps;
         singleproxy["server"] >>= server;
         singleproxy["port"] >>= port;
-        singleproxy["underlying-proxy"] >>= underlying_proxy;
+        singleproxy["dialer-proxy"] >>= underlying_proxy;
+        if(underlying_proxy.empty()) singleproxy["underlying-proxy"] >>= underlying_proxy;
         if(port.empty() || port == "0")
             continue;
         udp = safe_as<std::string>(singleproxy["udp"]);
-        tfo = safe_as<std::string>(singleproxy["fast-open"]);
+        tfo = safe_as<std::string>(singleproxy["tfo"].IsDefined() ? singleproxy["tfo"] : singleproxy["fast-open"]);
         scv = safe_as<std::string>(singleproxy["skip-cert-verify"]);
         switch(hash_(proxytype))
         {
@@ -1465,6 +1478,19 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
             singleproxy["sni"] >>= sni;
 
             anyTLSConstruct(node, group, ps, server, port, password, sni, udp, tfo, scv, underlying_proxy);
+            singleproxy["client-fingerprint"] >>= node.ClientFingerprint;
+            singleproxy["fingerprint"] >>= node.Fingerprint;
+            if(singleproxy["alpn"].IsSequence())
+                singleproxy["alpn"] >>= node.Alpn;
+            else if(singleproxy["alpn"].IsDefined())
+                node.Alpn = split(safe_as<std::string>(singleproxy["alpn"]), ",");
+            if(!readOptionalClashUInt(singleproxy, "idle-session-check-interval", node.IdleSessionCheckInterval) ||
+               !readOptionalClashUInt(singleproxy, "idle-session-timeout", node.IdleSessionTimeout) ||
+               !readOptionalClashUInt(singleproxy, "min-idle-session", node.MinIdleSession))
+            {
+                writeLog(0, "Skipped AnyTLS node: invalid idle-session parameter", LOG_LEVEL_WARNING);
+                continue;
+            }
             break;
         default:
             continue;
@@ -1663,35 +1689,23 @@ void explodeHysteria2(std::string hysteria2, Proxy &node) {
     }
 }
 
-void explodeAnyTLS(std::string anytls, Proxy &node) {
-    std::string add, port, password, sni, remarks;
-    std::string addition;
-    tribool udp, scv;
-
-    anytls = anytls.substr(9);
-    string_size pos;
-    pos = anytls.rfind('#');
-    if (pos != std::string::npos) {
-        remarks = urlDecode(anytls.substr(pos + 1));
-        anytls.erase(pos);
-    }
-
-    pos = anytls.rfind('?');
-    if (pos != std::string::npos) {
-        addition = anytls.substr(pos + 1);
-        anytls.erase(pos);
-    }
-
-    if (regGetMatch(anytls, R"(^(.*?)@(.*)[:](\d+)$)", 4, 0, &password, &add, &port))
+void explodeAnyTLS(std::string anytls, Proxy &node)
+{
+    share_uri::Link link;
+    tribool udp, tfo, scv;
+    if(!share_uri::parse(anytls, "anytls", link, "443") ||
+       !link.boolean("udp", udp) || !link.boolean("tfo", tfo) || !link.boolean("insecure", scv))
         return;
-    if (port == "0")
-        return;
-    sni = getUrlArg(addition, "sni");
-    udp = getUrlArg(addition, "udp");
-    scv = getUrlArg(addition, "insecure");
-    if (remarks.empty())
-        remarks = add + ":" + port;
-    anyTLSConstruct(node, ANYTLS_DEFAULT_GROUP, remarks, add, port, password, sni, udp, tribool(), scv, "");
+    const string_array accepted = {"sni", "peer", "udp", "tfo", "insecure", "fp", "client-fingerprint", "fingerprint", "alpn"};
+    for(const auto &entry : link.query)
+        if(std::find(accepted.begin(), accepted.end(), entry.first) == accepted.end()) return;
+    if(!link.get("sni").empty() && !link.get("peer").empty() && link.get("sni") != link.get("peer")) return;
+    if(!link.get("fp").empty() && !link.get("client-fingerprint").empty() && link.get("fp") != link.get("client-fingerprint")) return;
+    const auto sni = link.get("sni").empty() ? link.get("peer") : link.get("sni");
+    anyTLSConstruct(node, ANYTLS_DEFAULT_GROUP, link.remark, link.server, link.port, link.userinfo, sni, udp, tfo, scv, "");
+    node.ClientFingerprint = link.get("client-fingerprint").empty() ? link.get("fp") : link.get("client-fingerprint");
+    node.Fingerprint = link.get("fingerprint");
+    if(!link.get("alpn").empty()) node.Alpn = split(link.get("alpn"), ",");
 }
 
 // peer = (public-key = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=, allowed-ips = "0.0.0.0/0, ::/0", endpoint = engage.cloudflareclient.com:2408, client-id = 139/184/125),(public-key = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=, endpoint = engage.cloudflareclient.com:2408)

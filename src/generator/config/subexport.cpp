@@ -30,6 +30,22 @@ const string_array clashr_protocols = {"origin", "auth_sha1_v4", "auth_aes128_md
 const string_array clashr_obfs = {"plain", "http_simple", "http_post", "random_head", "tls1.2_ticket_auth", "tls1.2_ticket_fastauth"};
 const string_array clash_ssr_ciphers = {"rc4-md5", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "chacha20-ietf", "xchacha20", "none"};
 
+static void warnProxyConversion(const Proxy &node, const char *target, const char *reason)
+{
+    writeLog(0, getProxyTypeName(node.Type) + " -> " + target + ": " + reason, LOG_LEVEL_WARNING);
+}
+
+static bool anyTLSTextSafe(const Proxy &node)
+{
+    // These targets have different quoting grammars. Do not reinterpret a
+    // decoded secret or label as a second configuration option.
+    for(const auto *value : {&node.Password, &node.SNI, &node.Remark, &node.Hostname, &node.Fingerprint, &node.UnderlyingProxy})
+        if(value->find_first_of(",\"\\\r\n") != std::string::npos || trim(*value) != *value ||
+           std::any_of(value->begin(), value->end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; }))
+            return false;
+    return true;
+}
+
 std::string vmessLinkConstruct(const std::string &remarks, const std::string &add, const std::string &port, const std::string &type, const std::string &id, const std::string &aid, const std::string &net, const std::string &path, const std::string &host, const std::string &tls)
 {
     rapidjson::StringBuffer sb;
@@ -619,10 +635,23 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         case ProxyType::AnyTLS:
             singleproxy["type"] = "anytls";
             singleproxy["password"] = x.Password;
+            singleproxy["password"].SetTag("tag:yaml.org,2002:str");
             if (!x.SNI.empty())
                 singleproxy["sni"] = x.SNI;
             if (!scv.is_undef())
                 singleproxy["skip-cert-verify"] = scv.get();
+            if(!x.ClientFingerprint.empty())
+                singleproxy["client-fingerprint"] = x.ClientFingerprint;
+            if(!x.Fingerprint.empty())
+                singleproxy["fingerprint"] = x.Fingerprint;
+            if(!x.Alpn.empty())
+                singleproxy["alpn"] = x.Alpn;
+            if(x.IdleSessionCheckInterval)
+                singleproxy["idle-session-check-interval"] = *x.IdleSessionCheckInterval;
+            if(x.IdleSessionTimeout)
+                singleproxy["idle-session-timeout"] = *x.IdleSessionTimeout;
+            if(x.MinIdleSession)
+                singleproxy["min-idle-session"] = *x.MinIdleSession;
             break;
         default:
             continue;
@@ -630,8 +659,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
 
         // UDP is not supported yet in clash using snell
         // sees in https://dreamacro.github.io/clash/configuration/outbound.html#snell
-        if(udp && x.Type != ProxyType::Snell)
-            singleproxy["udp"] = true;
+        if(!udp.is_undef() && x.Type != ProxyType::Snell)
+            singleproxy["udp"] = udp.get();
+        if(!x.UnderlyingProxy.empty())
+            singleproxy["dialer-proxy"] = x.UnderlyingProxy;
         if(!tfo.is_undef())
             singleproxy["tfo"] = tfo.get();
         if(proxy_block)
@@ -1041,11 +1072,27 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
                 proxy += ",sni=" + x.SNI;
             break;
         case ProxyType::AnyTLS:
+            if(!x.Fingerprint.empty() && scv.get())
+            {
+                warnProxyConversion(x, "Surge", "skipped: insecure certificate-pin precedence is not verified");
+                continue;
+            }
+            if(!anyTLSTextSafe(x))
+            {
+                warnProxyConversion(x, "Surge", "skipped: value cannot be represented safely in text output");
+                continue;
+            }
             if(surge_ver < 4 && surge_ver != -3)
                 continue;
             proxy = "anytls, " + hostname + ", " + port + ", password=" + password;
             if(!x.SNI.empty())
                 proxy += ",sni=" + x.SNI;
+            if(!x.ClientFingerprint.empty() || !x.Alpn.empty() || x.IdleSessionCheckInterval || x.IdleSessionTimeout || x.MinIdleSession)
+                warnProxyConversion(x, "Surge", "ClientHello/ALPN/session options are not exported by this target");
+            if(!x.Fingerprint.empty())
+                proxy += ",server-cert-fingerprint-sha256=" + x.Fingerprint;
+            if(!scv.is_undef())
+                proxy += ",skip-cert-verify=" + scv.get_str();
             break;
         default:
             continue;
@@ -1687,9 +1734,26 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
             }
             break;
         case ProxyType::AnyTLS:
-            proxyStr = "anytls = " + hostname + ":" + port + ", password=" + password;
+            if(!anyTLSTextSafe(x))
+            {
+                warnProxyConversion(x, "QuanX", "skipped: value cannot be represented safely in text output");
+                continue;
+            }
+            if(!x.UnderlyingProxy.empty() || (!x.Fingerprint.empty() && scv.get()))
+            {
+                warnProxyConversion(x, "QuanX", "skipped: dialer-proxy or insecure certificate pin cannot be preserved");
+                continue;
+            }
+            proxyStr = "anytls = " + hostname + ":" + port + ", password=" + password + ", over-tls=true";
+            if(!x.Fingerprint.empty())
+            {
+                proxyStr += ", tls-cert-sha256=" + x.Fingerprint;
+                scv = false;
+            }
             if (!x.SNI.empty())
                 proxyStr += ", tls-host=" + x.SNI;
+            if(!x.ClientFingerprint.empty() || !x.Alpn.empty() || x.IdleSessionCheckInterval || x.IdleSessionTimeout || x.MinIdleSession)
+                warnProxyConversion(x, "QuanX", "ClientHello/ALPN/session options are not exported by this target");
             break;
         default:
             continue;
@@ -2176,11 +2240,30 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                 proxy += ",sni=" + x.SNI;
             break;
         case ProxyType::AnyTLS:
+            if(!x.Fingerprint.empty() && scv.get())
+            {
+                warnProxyConversion(x, "Loon", "skipped: insecure certificate-pin precedence is not verified");
+                continue;
+            }
+            if(!anyTLSTextSafe(x))
+            {
+                warnProxyConversion(x, "Loon", "skipped: value cannot be represented safely in text output");
+                continue;
+            }
             proxy = "anytls," + hostname + "," + port + ",\"" + password + "\"";
             if (!x.SNI.empty())
                 proxy += ",sni=" + x.SNI;
             if (!scv.is_undef())
                 proxy += ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
+            if(!x.ClientFingerprint.empty() || !x.Alpn.empty() || x.IdleSessionCheckInterval || x.IdleSessionTimeout || x.MinIdleSession)
+                warnProxyConversion(x, "Loon", "ClientHello/ALPN/session options are not exported by this target");
+            if(!x.UnderlyingProxy.empty())
+            {
+                warnProxyConversion(x, "Loon", "skipped: dialer-proxy cannot be preserved");
+                continue;
+            }
+            if(!x.Fingerprint.empty())
+                proxy += ",tls-cert-sha256=" + x.Fingerprint;
             break;
         default:
             continue;
@@ -2571,13 +2654,21 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
             }
             case ProxyType::AnyTLS:
             {
+                // Older supported sing-box versions only have SPKI pinning, which
+                // must not be substituted for Mihomo's whole-certificate SHA256.
+                if(!x.Fingerprint.empty())
+                {
+                    warnProxyConversion(x, "sing-box", "skipped: whole-certificate pin needs a version-specific TLS mapping");
+                    continue;
+                }
                 addSingBoxCommonMembers(proxy, x, "anytls", allocator);
-                rapidjson::Value users(rapidjson::kArrayType);
-                rapidjson::Value user(rapidjson::kObjectType);
-                user.AddMember("username", "sekai", allocator);
-                user.AddMember("password", rapidjson::StringRef(x.Password.c_str()), allocator);
-                users.PushBack(user, allocator);
-                proxy.AddMember("users", users, allocator);
+                proxy.AddMember("password", rapidjson::StringRef(x.Password.c_str()), allocator);
+                if(x.IdleSessionCheckInterval)
+                    proxy.AddMember("idle_session_check_interval", rapidjson::Value((std::to_string(*x.IdleSessionCheckInterval) + "s").c_str(), allocator), allocator);
+                if(x.IdleSessionTimeout)
+                    proxy.AddMember("idle_session_timeout", rapidjson::Value((std::to_string(*x.IdleSessionTimeout) + "s").c_str(), allocator), allocator);
+                if(x.MinIdleSession)
+                    proxy.AddMember("min_idle_session", *x.MinIdleSession, allocator);
                 break;
             }
             default:
@@ -2607,6 +2698,13 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
             }
             if (!x.CaStr.empty())
                 tls.AddMember("certificate", rapidjson::StringRef(x.CaStr.c_str()), allocator);
+            if(x.Type == ProxyType::AnyTLS && !x.ClientFingerprint.empty())
+            {
+                rapidjson::Value utls(rapidjson::kObjectType);
+                utls.AddMember("enabled", true, allocator);
+                utls.AddMember("fingerprint", rapidjson::StringRef(x.ClientFingerprint.c_str()), allocator);
+                tls.AddMember("utls", utls, allocator);
+            }
             proxy.AddMember("tls", tls, allocator);
         }
         if (!udp.is_undef() && !udp)
@@ -2617,6 +2715,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
         {
             proxy.AddMember("tcp_fast_open", buildBooleanValue(tfo), allocator);
         }
+        if(!x.UnderlyingProxy.empty())
+            proxy.AddMember("detour", rapidjson::StringRef(x.UnderlyingProxy.c_str()), allocator);
         nodelist.push_back(x);
         remarks_list.emplace_back(x.Remark);
         outbounds.PushBack(proxy, allocator);
