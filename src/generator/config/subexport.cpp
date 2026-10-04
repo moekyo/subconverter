@@ -23,6 +23,7 @@
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
 #include "nodemanip.h"
+#include "clash_group_graph.h"
 #include "ruleconvert.h"
 
 extern string_array ss_ciphers, ssr_ciphers;
@@ -43,7 +44,7 @@ struct ExportChains
     using Identity = const SourceNodeIdentity *;
     std::map<std::string, std::vector<Identity>> sources;
     std::set<const SourceNodeRegistry *> registries;
-    std::set<std::string> groups, empty_groups;
+    std::set<std::string> groups, empty_groups, invalid_groups;
     std::map<std::string, std::vector<std::string>> group_members;
     std::vector<Identity> emitted;
     std::vector<std::string> final_names;
@@ -130,8 +131,9 @@ struct ExportChains
                 auto [name, leaving] = pending.back();
                 pending.pop_back();
                 if(leaving) { active.erase(name); complete.insert(name); continue; }
+                if(invalid_groups.count(name)) return true;
                 if(name == "DIRECT" || name == "REJECT" || name == "REJECT-TINYGIF" || name == "dns-out" || complete.count(name)) continue;
-                if(!active.insert(name).second || empty_groups.count(name)) return true;
+                if(!active.insert(name).second || empty_groups.count(name) || invalid_groups.count(name)) return true;
                 pending.emplace_back(name, true);
                 const auto members = group_members.find(name);
                 const auto node = nodes.find(name);
@@ -181,7 +183,7 @@ static bool groupChainFailure(const ExportChains &chains, extra_settings &ext)
     if(!ext.nodelist && chains.invalidGroupChain())
     {
         ext.chain_conversion_failed = true;
-        writeLog(0, "Conversion refused: proxy chain reaches an empty, missing or cyclic group", LOG_LEVEL_ERROR);
+        writeLog(0, "Conversion refused: proxy chain reaches an invalid, unsupported, empty, missing or cyclic group", LOG_LEVEL_ERROR);
         return true;
     }
     return false;
@@ -403,23 +405,28 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist, string
 void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext)
 {
     YAML::Node proxies, original_groups;
+    std::map<std::string, YAML::Node> validation_groups;
+    std::set<std::string> provider_names, generated_empty;
     std::vector<Proxy> nodelist;
     string_array remarks_list;
     ExportChains chains(nodes, ext);
     auto rendering_nodes = nodes;
     if(!ext.nodelist)
     {
-        chains.groups = {"DIRECT", "REJECT"};
+        chains.groups = {"DIRECT", "REJECT", "REJECT-DROP", "COMPATIBLE", "PASS", "PASS-RULE"};
+        const auto builtin_names = chains.groups;
         const char *key = ext.clash_new_field_name ? "proxy-groups" : "Proxy Group";
         if(yamlnode[key].IsSequence()) for(const auto &group : yamlnode[key])
-            if(group["name"].IsScalar())
+            if(group.IsMap() && group["name"].IsDefined() && group["name"].IsScalar())
             {
                 const auto name = group["name"].as<std::string>();
+                if(validation_groups.count(name) || builtin_names.count(name)) chains.invalid_groups.insert(name);
                 chains.groups.insert(name);
-                string_array members;
-                if(group["proxies"].IsSequence()) for(const auto &member : group["proxies"]) if(member.IsScalar()) members.push_back(member.as<std::string>());
-                chains.group(name, members, group["use"].IsDefined());
+                validation_groups[name].reset(group);
             }
+        if(yamlnode["proxy-providers"].IsMap())
+            for(const auto &provider : yamlnode["proxy-providers"])
+                if(provider.first.IsScalar() && provider.second.IsMap()) provider_names.insert(provider.first.as<std::string>());
         for(const auto &group : extra_proxy_group)
             if(group.Type == ProxyGroupType::Select || group.Type == ProxyGroupType::Relay || group.Type == ProxyGroupType::LoadBalance || group.Type == ProxyGroupType::Smart || group.Type == ProxyGroupType::URLTest || group.Type == ProxyGroupType::Fallback)
                 chains.groups.insert(group.Name);
@@ -970,7 +977,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         for(const auto& y : x.Proxies)
             groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-        chains.group(x.Name, filtered_nodelist, !x.UsingProvider.empty());
+        if(filtered_nodelist.empty() && x.UsingProvider.empty()) generated_empty.insert(x.Name);
+        else generated_empty.erase(x.Name);
         if(!x.UsingProvider.empty())
             singlegroup["use"] = x.UsingProvider;
         else
@@ -984,6 +992,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         else
             singlegroup.SetStyle(YAML::EmitterStyle::Flow);
 
+        if(x.Name == "DIRECT" || x.Name == "REJECT" || x.Name == "REJECT-DROP" || x.Name == "COMPATIBLE" || x.Name == "PASS" || x.Name == "PASS-RULE") chains.invalid_groups.insert(x.Name);
+        validation_groups[x.Name].reset(singlegroup);
         bool replace_flag = false;
         for(auto && original_group : original_groups)
         {
@@ -1014,6 +1024,11 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             yamlnode["Proxy Group"] = original_groups;
         else
             yamlnode.remove("Proxy Group");
+    }
+    for(const auto &[name, group] : clash_group_graph::build(proxies, validation_groups, provider_names, generated_empty))
+    {
+        chains.group(name, group.members, group.opaque);
+        if(!group.valid) chains.invalid_groups.insert(name);
     }
     if(groupChainFailure(chains, ext)) { yamlnode = YAML::Node(); return; }
 
