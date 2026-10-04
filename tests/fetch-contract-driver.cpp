@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include "handler/settings.h"
 #include "handler/webget.h"
+#include "utils/system.h"
 Settings global;
 // Keep test output machine-readable. The logger is the only service stub.
 void writeLog(int, const std::string &, int) {}
@@ -21,14 +22,16 @@ int main(int argc, char **argv) {
     int transport = -1, upstream = -1;
     bool force = std::stoi(argv[6]);
     unsigned int ttl = std::stoul(argv[4]);
+    // Same SYSTEM resolution used by parseProxy; only synthetic test environment.
+    const std::string proxy = std::string(argv[3]) == "SYSTEM" ? getSystemProxy() : argv[3];
     if (std::string(argv[1]) == "raw") {
-        FetchArgument arg{HTTP_GET, argv[2], argv[3], nullptr, &headers, nullptr, ttl, false, force};
+        FetchArgument arg{HTTP_GET, argv[2], proxy, nullptr, &headers, nullptr, ttl, false, force};
         FetchResult result{&status, &body, &response_headers, nullptr};
         status = webGet(arg, result);
         transport = result.transport_code;
         upstream = result.upstream_http_status;
     } else {
-        body = webGet(argv[2], argv[3], ttl, &response_headers, &headers, force);
+        body = webGet(argv[2], proxy, ttl, &response_headers, &headers, force);
     }
     nlohmann::json j;
     j["body"] = body;

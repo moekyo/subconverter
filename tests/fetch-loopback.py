@@ -76,8 +76,9 @@ def fresh(name):
 def call(path, *, cwd, mode='cache', ttl=0, api=True, force=False, auth='-', proxy_arg='', env_extra=None):
     target = url(origin,path)
     assert urlsplit(target).hostname == '127.0.0.1'
-    if proxy_arg:
+    if proxy_arg and proxy_arg != "SYSTEM":
         normalized = proxy_arg.removeprefix('cors:')
+        if "://" not in normalized: normalized = "http://" + normalized
         assert urlsplit(normalized).hostname == '127.0.0.1'
     env = {k:v for k,v in os.environ.items() if k.lower() not in ('http_proxy','https_proxy','all_proxy','no_proxy')}
     # Make all traffic explicitly local and eliminate inherited proxy endpoints.
@@ -164,6 +165,33 @@ try:
     b=call('/route',cwd=cwd,proxy_arg=url(proxy),force=True)
     assert a['body']=='ORIGIN' and b['body']=='PROXY'
     record('normal_proxy_force_control','PASS: force_proxy disables NO_PROXY for ordinary explicit proxy',unforced_body=a['body'],forced_body=b['body'])
+
+    # Equivalent forced HTTP descriptors and actual SYSTEM environment lookup.
+    bare = f"127.0.0.1:{proxy.server_port}"
+    for mode in ("raw", "cache"):
+        for descriptor, system_value in ((bare, ""), (url(proxy), ""), ("SYSTEM", bare), ("SYSTEM", url(proxy))):
+            before = [len(x.calls) for x in servers]
+            env = {"all_proxy": system_value, "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
+            a = call('/bare-proxy', cwd=fresh('bare-proxy'), mode=mode, force=True, proxy_arg=descriptor, env_extra=env)
+            assert a['body'] == 'PROXY'
+            assert [len(x.calls) - n for x, n in zip(servers, before)] == [0, 1, 0]
+    record('bare_explicit_system_force', 'PASS: bare/explicit and SYSTEM values use proxy despite NO_PROXY, raw and wrapper', cases=8)
+
+    # Normalize equivalent bare/explicit identities before both cache and curl.
+    cwd = fresh('normalized-proxy-cache')
+    before = len(proxy.calls)
+    a = call('/normalized-proxy-cache', cwd=cwd, ttl=60, force=True, proxy_arg=bare)
+    b = call('/normalized-proxy-cache', cwd=cwd, ttl=60, force=True, proxy_arg=url(proxy))
+    assert a['body'] == b['body'] == 'PROXY' and len(proxy.calls) - before == 1
+    record('normalized_proxy_cache', 'PASS: equivalent forced descriptors share one validated cache identity', requests=1)
+
+    for descriptor in ('127.0.0.1:0', '127.0.0.1:65536', '127.0.0.1:bad', 'http://127.0.0.1:0'):
+        before = [len(x.calls) for x in servers]
+        for mode in ('raw', 'cache'):
+            a = call('/bad-bare-proxy', cwd=fresh('bad-bare'), mode=mode, force=True, proxy_arg=descriptor)
+            assert a['body'] == ''
+        assert before == [len(x.calls) for x in servers]
+    record('invalid_bare_proxy', 'PASS: malformed bare endpoints fail closed without origin/proxy/gateway requests', cases=8)
 
     # cors: takes a URL-prefix branch; force has no influence on proxy selection.
     before_proxy=len(proxy.calls)

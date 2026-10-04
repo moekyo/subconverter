@@ -38,5 +38,10 @@ int main()
     for(const auto &proxy : {"", "NONE", "cors:", "cors:https://proxy.example/", "file:///tmp/proxy", "http://", "http://:8080", "http://proxy.example:0", "http://proxy.example:65536", "http://proxy.example:443junk", "http://proxy.example/path"})
         assert(!isSupportedForcedSubscriptionProxy(proxy));
 
+    std::string normalized;
+    assert(normalizeForcedSubscriptionProxy("127.0.0.1:7890", normalized) && normalized == "http://127.0.0.1:7890");
+    assert(normalizeForcedSubscriptionProxy("[::ffff:192.0.2.1]:7890", normalized));
+    for(const auto &proxy : {"SYSTEM", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:bad", "127.0.0.1:7890/path", "http://[1:2:3:4:5:6:7:8:9::]:443", "http://bad,host:443", "http://[fe80::1%25eth0]:443"})
+        assert(!isSupportedForcedSubscriptionProxy(proxy));
     return 0;
 }

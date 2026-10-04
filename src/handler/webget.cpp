@@ -202,7 +202,8 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
 {
     result.transport_code = CURLE_OK;
     result.upstream_http_status = 0;
-    if(argument.force_proxy && !isSupportedForcedSubscriptionProxy(argument.proxy))
+    std::string normalized_proxy = argument.proxy;
+    if(argument.force_proxy && !normalizeForcedSubscriptionProxy(argument.proxy, normalized_proxy))
     {
         *result.status_code = 0;
         result.transport_code = CURLE_COULDNT_CONNECT;
@@ -232,7 +233,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
         }
         else
         {
-            curl_easy_setopt(curl_handle, CURLOPT_PROXY, argument.proxy.data());
+            curl_easy_setopt(curl_handle, CURLOPT_PROXY, normalized_proxy.data());
             if(argument.force_proxy)
                 curl_easy_setopt(curl_handle, CURLOPT_NOPROXY, "");
         }
@@ -390,7 +391,8 @@ std::string webGet(
     string_icase_map *request_headers,
     bool force_proxy)
 {
-    if(force_proxy && !isSupportedForcedSubscriptionProxy(proxy))
+    std::string normalized_proxy = proxy;
+    if(force_proxy && !normalizeForcedSubscriptionProxy(proxy, normalized_proxy))
     {
         if(response_headers) response_headers->clear();
         writeLog(0, "Forced subscription proxy is invalid or unsupported; refusing fetch and cached fallback.", LOG_LEVEL_ERROR);
@@ -400,7 +402,7 @@ std::string webGet(
     std::string content;
 
     FetchArgument argument {
-        HTTP_GET, url, proxy, nullptr, request_headers, nullptr, cache_ttl, false, force_proxy};
+        HTTP_GET, url, normalized_proxy, nullptr, request_headers, nullptr, cache_ttl, false, force_proxy};
     FetchResult fetch_res {&return_code, &content, response_headers, nullptr};
 
     if (startsWith(url, "data:"))
@@ -423,8 +425,8 @@ std::string webGet(
             }
             cache_identity += "\nrequest-context-md5:" + getMD5(context);
         }
-        if(!proxy.empty())
-            cache_identity += "\nproxy-md5:" + getMD5(proxy);
+        if(!normalized_proxy.empty())
+            cache_identity += "\nproxy-md5:" + getMD5(normalized_proxy);
         if(force_proxy)
             cache_identity += "\nforce-proxy:1";
         const std::string url_md5 = getMD5(cache_identity);
