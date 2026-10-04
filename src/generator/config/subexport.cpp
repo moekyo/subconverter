@@ -11,17 +11,20 @@
 #include "generator/template/templates.h"
 #include "handler/settings.h"
 #include "parser/config/proxy.h"
+#include "parser/conversion_report.h"
 #include "script/script_quickjs.h"
 #include "utils/bitwise.h"
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/plugin_options.h"
 #include "utils/rapidjson_extra.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
+#include "utils/yaml_strings.h"
 #include "nodemanip.h"
 #include "clash_group_graph.h"
 #include "ruleconvert.h"
@@ -48,8 +51,11 @@ struct ExportChains
     std::map<std::string, std::vector<std::string>> group_members;
     std::vector<Identity> emitted;
     std::vector<std::string> final_names;
+    std::shared_ptr<ConversionReport> report;
     explicit ExportChains(std::vector<Proxy> &nodes, extra_settings &ext)
     {
+        report = ext.source_registry->Report;
+        if(report) report->emitted_names.clear();
         ext.chain_conversion_failed = false;
         addRegistry(ext.source_registry);
         for(auto &node : nodes)
@@ -68,6 +74,7 @@ struct ExportChains
     }
     void record(const Proxy &node)
     {
+        if(report) report->emitted(node.SourceIdentity.get(), node.Remark);
         emitted.push_back(node.SourceIdentity.get());
         final_names.push_back(node.Remark);
     }
@@ -508,15 +515,20 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["plugin-opts"]["host"] = urlDecode(getUrlArg(pluginopts, "obfs-host"));
                 break;
             case "v2ray-plugin"_hash:
+            {
+                PluginOptions options;bool mux=false;
+                if(!options.parse(x.PluginOption)||!options.mux(mux))
+                {warnProxyConversion(x,"Clash","skipped: malformed or ambiguous plugin options");continue;}
                 singleproxy["plugin"] = "v2ray-plugin";
-                singleproxy["plugin-opts"]["mode"] = getUrlArg(pluginopts, "mode");
-                singleproxy["plugin-opts"]["host"] = getUrlArg(pluginopts, "host");
-                singleproxy["plugin-opts"]["path"] = getUrlArg(pluginopts, "path");
-                singleproxy["plugin-opts"]["tls"] = pluginopts.find("tls") != std::string::npos;
-                singleproxy["plugin-opts"]["mux"] = pluginopts.find("mux") != std::string::npos;
+                singleproxy["plugin-opts"]["mode"] = options.get("mode");
+                singleproxy["plugin-opts"]["host"] = options.get("host");
+                singleproxy["plugin-opts"]["path"] = options.get("path");
+                singleproxy["plugin-opts"]["tls"] = options.tls();
+                singleproxy["plugin-opts"]["mux"] = mux;
                 if(!scv.is_undef())
                     singleproxy["plugin-opts"]["skip-cert-verify"] = scv.get();
                 break;
+            }
             }
             break;
         case ProxyType::VMess:
@@ -895,6 +907,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             singleproxy.SetStyle(YAML::EmitterStyle::Block);
         else
             singleproxy.SetStyle(YAML::EmitterStyle::Flow);
+        preserveYamlStrings(singleproxy);
         proxies.push_back(singleproxy);
         chains.record(x);
         remarks_list.emplace_back(x.Remark);
@@ -2018,23 +2031,27 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
                             proxyStr += ", " + replaceAllDistinct(pluginopts, ";", ", ");
                         break;
                     case "v2ray-plugin"_hash:
-                        pluginopts = replaceAllDistinct(pluginopts, ";", "&");
-                        plugin = getUrlArg(pluginopts, "mode") == "websocket" ? "ws" : "";
-                        host = getUrlArg(pluginopts, "host");
-                        path = getUrlArg(pluginopts, "path");
-                        tlssecure = pluginopts.find("tls") != std::string::npos;
-                        if(tlssecure && plugin == "ws")
+                    {
+                        PluginOptions options;bool mux=false;
+                        if(!options.parse(pluginopts)||!options.mux(mux))
+                        {warnProxyConversion(x,"QuanX","skipped: malformed or ambiguous plugin options");continue;}
+                        std::string plugin_transport = options.get("mode") == "websocket" ? "ws" : "";
+                        const auto plugin_host=options.get("host"),plugin_path=options.get("path");
+                        if(plugin_host.find_first_of(",\"\\\r\n")!=std::string::npos||plugin_path.find_first_of(",\"\\\r\n")!=std::string::npos)
+                        {warnProxyConversion(x,"QuanX","skipped: plugin values need unsupported text quoting");continue;}
+                        if(options.tls() && plugin_transport == "ws")
                         {
-                            plugin += 's';
+                            plugin_transport += 's';
                             if(!tls13.is_undef())
                                 proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
                         }
-                        proxyStr += ", obfs=" + plugin;
-                        if(!host.empty())
-                            proxyStr += ", obfs-host=" + host;
-                        if(!path.empty())
-                            proxyStr += ", obfs-uri=" + path;
+                        proxyStr += ", obfs=" + plugin_transport;
+                        if(!plugin_host.empty())
+                            proxyStr += ", obfs-host=" + plugin_host;
+                        if(!plugin_path.empty())
+                            proxyStr += ", obfs-uri=" + plugin_path;
                         break;
+                    }
                     default: continue;
                 }
             }

@@ -16,6 +16,7 @@
 #include "utils/lock.h"
 #include "utils/logger.h"
 #include "utils/urlencode.h"
+#include "utils/sha256.h"
 #include "version.h"
 #include "webget.h"
 
@@ -389,8 +390,10 @@ std::string webGet(
     unsigned int cache_ttl,
     std::string *response_headers,
     string_icase_map *request_headers,
-    bool force_proxy)
+    bool force_proxy,
+    FetchProvenance *provenance)
 {
+    if(provenance) *provenance = FetchProvenance{};
     std::string normalized_proxy = proxy;
     if(force_proxy && !normalizeForcedSubscriptionProxy(proxy, normalized_proxy))
     {
@@ -406,29 +409,33 @@ std::string webGet(
     FetchResult fetch_res {&return_code, &content, response_headers, nullptr};
 
     if (startsWith(url, "data:"))
+    {
+        if(provenance) {provenance->origin="data";provenance->context_sha256=sha256("data:"+url);}
         return dataGet(url);
+    }
+    // Use exactly the cache namespace inputs as the private fetch witness,
+    // including requests with TTL=0. This does not change cache keys or policy.
+    std::string cache_identity = "fetch-cache-v2\n" + url;
+    if(request_headers)
+    {
+        std::string context = "headers-present\n";
+        for(const auto &entry : *request_headers)
+        {
+            auto key = entry.first;
+            std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
+            context += std::to_string(key.size()) + ":" + key + std::to_string(entry.second.size()) + ":" + entry.second;
+        }
+        cache_identity += "\nrequest-context-md5:" + getMD5(context);
+    }
+    if(!normalized_proxy.empty()) cache_identity += "\nproxy-md5:" + getMD5(normalized_proxy);
+    if(force_proxy) cache_identity += "\nforce-proxy:1";
+    if(provenance) provenance->context_sha256=sha256(cache_identity);
     // cache system
     if(cache_ttl > 0)
     {
         md("cache");
         // Version the namespace so old entries lacking request context cannot
         // satisfy authenticated requests after the fix. Values are only hashed.
-        std::string cache_identity = "fetch-cache-v2\n" + url;
-        if(request_headers)
-        {
-            std::string context = "headers-present\n";
-            for(const auto &entry : *request_headers)
-            {
-                auto key = entry.first;
-                std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
-                context += std::to_string(key.size()) + ":" + key + std::to_string(entry.second.size()) + ":" + entry.second;
-            }
-            cache_identity += "\nrequest-context-md5:" + getMD5(context);
-        }
-        if(!normalized_proxy.empty())
-            cache_identity += "\nproxy-md5:" + getMD5(normalized_proxy);
-        if(force_proxy)
-            cache_identity += "\nforce-proxy:1";
         const std::string url_md5 = getMD5(cache_identity);
         const std::string path = "cache/" + url_md5, path_header = path + "_header";
         struct stat result {};
@@ -437,6 +444,7 @@ std::string webGet(
             time_t mtime = result.st_mtime, now = time(nullptr); // get cache modified time and current time
             if(difftime(now, mtime) <= cache_ttl) // within TTL
             {
+                if(provenance) provenance->origin="cache";
                 writeLog(0, "CACHE HIT: '" + url + "', using local cache.");
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
@@ -453,6 +461,7 @@ std::string webGet(
         curlGet(argument, fetch_res);
         if(return_code == 200 && fetch_res.transport_code == CURLE_OK) // complete response only
         {
+            if(provenance) provenance->origin="network";
             //guarded_mutex guard(cache_rw_lock);
             cache_rw_lock.writeLock();
             defer(cache_rw_lock.writeUnlock();)
@@ -464,6 +473,7 @@ std::string webGet(
         {
             if(fileExist(path) && global.serveCacheOnFetchFail) // failed, check if cache exist
             {
+                if(provenance) provenance->origin="stale-cache";
                 writeLog(0, "Fetch failed. Serving cached content."); // cache exist, serving cache
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
@@ -479,6 +489,7 @@ std::string webGet(
     }
     //return curlGet(url, proxy, response_headers, return_code);
     curlGet(argument, fetch_res);
+    if(provenance && return_code == 200 && fetch_res.transport_code == CURLE_OK) provenance->origin="network";
     return content;
 }
 

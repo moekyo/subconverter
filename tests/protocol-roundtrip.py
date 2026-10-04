@@ -16,7 +16,7 @@ from urllib.parse import quote
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "build/reality-roundtrip"
+BUILD = Path(os.environ.get("SUBCONVERTER_TEST_BUILD", ROOT / "build/reality-roundtrip"))
 if not os.environ.get("SUBCONVERTER_TEST_SKIP_BUILD"):
     subprocess.run(["cmake", "-S", str(ROOT / "tests"), "-B", str(BUILD)], check=True)
     subprocess.run(["cmake", "--build", str(BUILD), "-j", "2"], check=True)

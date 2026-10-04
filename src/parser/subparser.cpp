@@ -13,8 +13,10 @@
 #include "utils/yamlcpp_extra.h"
 #include "config/proxy.h"
 #include "subparser.h"
+#include "conversion_report.h"
 #include "share_uri.h"
 #include "utils/logger.h"
+#include "utils/plugin_options.h"
 
 using namespace rapidjson;
 using namespace rapidjson_ext;
@@ -1251,6 +1253,7 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes, const SourceRegistry
         // A malformed name must not erase an otherwise visible chain declaration.
         // Keep the anonymous row rejected until its identity and fields are valid.
         auto source_record = registry->reserve("");
+        if(registry->Report) registry->Report->bindClashNode(i, source_record);
         try
         {
         std::string proxytype, ps, server, port, cipher, group, password, underlying_proxy; //common
@@ -1464,11 +1467,11 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes, const SourceRegistry
                 pluginopts += pluginopts_host.empty() ? "" : ";obfs-host=" + pluginopts_host;
                 break;
             case "v2ray-plugin"_hash:
-                pluginopts = "mode=" + pluginopts_mode + ";" + tls + pluginopts_mux;
+                pluginopts = "mode=" + escapePluginOption(pluginopts_mode) + ";" + tls + pluginopts_mux;
                 if(!pluginopts_host.empty())
-                    pluginopts += "host=" + pluginopts_host + ";";
+                    pluginopts += "host=" + escapePluginOption(pluginopts_host) + ";";
                 if(!path.empty())
-                    pluginopts += "path=" + path + ";";
+                    pluginopts += "path=" + escapePluginOption(path) + ";";
                 break;
             }
 
@@ -1489,7 +1492,7 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes, const SourceRegistry
             singleproxy["username"] >>= user;
             singleproxy["password"] >>= password;
 
-            socksConstruct(node, group, ps, server, port, user, password, tribool(),  tribool(),  tribool(), underlying_proxy);
+            socksConstruct(node, group, ps, server, port, user, password, udp, tfo, scv, underlying_proxy);
             break;
         case "ssr"_hash:
             group = SSR_DEFAULT_GROUP;
@@ -2978,6 +2981,11 @@ void explode(const std::string &link, Proxy &node, SourceRegistry registry)
     if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     node.SourceRegistryRef = registry;
     node.SourceIdentity = share_uri::reserveSource(link, registry);
+    if(registry->Report)
+    {
+        if(!node.SourceIdentity) node.SourceIdentity=registry->reserve("");
+        registry->Report->bindUriNode(link,node.SourceIdentity);
+    }
     if(startsWith(link, "ssr://"))
         explodeSSR(link, node, registry);
     else if(startsWith(link, "vmess://") || startsWith(link, "vmess1://"))

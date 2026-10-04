@@ -11,6 +11,7 @@
 
 using String = std::string;
 using StringArray = std::vector<String>;
+struct ConversionReport;
 
 enum class ProxyType
 {
@@ -88,6 +89,7 @@ struct SourceNodeIdentity
 };
 struct SourceNodeRegistry
 {
+    std::shared_ptr<ConversionReport> Report;
     std::vector<std::shared_ptr<SourceNodeIdentity>> Records;
     std::shared_ptr<SourceNodeIdentity> reserve(const std::string &name)
     {

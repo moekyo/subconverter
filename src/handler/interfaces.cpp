@@ -7,6 +7,7 @@
 
 #include "config/binding.h"
 #include "generator/config/nodemanip.h"
+#include "parser/conversion_report.h"
 #include "generator/config/ruleconvert.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
@@ -339,7 +340,7 @@ void checkExternalBase(const std::string &path, std::string &dest)
         dest = path;
 }
 
-std::string subconverter(RESPONSE_CALLBACK_ARGS)
+static std::string subconverterImpl(Request &request, Response &response, const SourceRegistry &registry)
 {
     auto &argument = request.argument;
     int *status_code = &response.status_code;
@@ -389,6 +390,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     string_array lIncludeRemarks = global.includeRemarks, lExcludeRemarks = global.excludeRemarks;
     std::vector<RulesetContent> lRulesetContent;
     extra_settings ext;
+    if(registry) ext.source_registry = registry;
     std::string subInfo, dummy;
     int interval = !argUpdateInterval.empty() ? to_int(argUpdateInterval, global.updateInterval) : global.updateInterval;
     bool authorized = !global.APIMode || getUrlArg(argument, "token") == global.accessToken, strict = !argUpdateStrict.empty() ? argUpdateStrict == "true" : global.updateStrict;
@@ -458,6 +460,12 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     ext.udp.define(argUDP).define(global.UDPFlag);
     ext.skip_cert_verify.define(argSkipCertVerify).define(global.skipCertVerify);
     ext.tls13.define(argTLS13).define(global.TLS13Flag);
+    if(registry && registry->Report)
+    {
+        if(!ext.udp.is_undef()) registry->Report->configured_defaults["udp"]=ext.udp.get();
+        if(!ext.tfo.is_undef()) registry->Report->configured_defaults["tfo"]=ext.tfo.get();
+        if(!ext.skip_cert_verify.is_undef()) registry->Report->configured_defaults["skip-cert-verify"]=ext.skip_cert_verify.get();
+    }
 
     ext.sort_flag = argSort.get(global.enableSort);
     argUseSortScript.define(!global.sortScript.empty());
@@ -1010,6 +1018,31 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     if(!argFilename.empty())
         response.headers.emplace("Content-Disposition", "attachment; filename=\"" + argFilename + "\"; filename*=utf-8''" + urlEncode(argFilename));
     return output_content;
+}
+
+std::string subconverter(RESPONSE_CALLBACK_ARGS)
+{
+    const auto version = getUrlArg(request.argument, "completeness");
+    if(version.empty()) return subconverterImpl(request, response, {});
+    response.content_type = "application/vnd.subconverter.completeness+json";
+    response.headers["Cache-Control"] = "no-store";
+    const auto nonce = getUrlArg(request.argument, "report_nonce");
+    auto registry = std::make_shared<SourceNodeRegistry>();
+    registry->Report = std::make_shared<ConversionReport>(nonce);
+    std::string output;
+    if(version != "1" || nonce.size() != 32 || !std::all_of(nonce.begin(), nonce.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }) || !getUrlArg(request.argument, "upload").empty() || request.method == "HEAD")
+    {
+        response.status_code = 400;
+        registry->Report->request_failure = "REQUEST_UNVERIFIED";
+    }
+    else
+    {
+        try { output = subconverterImpl(request, response, registry); }
+        catch(const std::exception &) { response.status_code = 400; registry->Report->request_failure = "CONVERSION_FAILED"; }
+    }
+    return registry->Report->finish(getUrlArg(request.argument, "target"), output, response.status_code);
 }
 
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS)

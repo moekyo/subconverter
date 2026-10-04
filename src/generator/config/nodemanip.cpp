@@ -9,6 +9,7 @@
 #include "parser/config/proxy.h"
 #include "parser/infoparser.h"
 #include "parser/subparser.h"
+#include "parser/conversion_report.h"
 #include "parser/share_uri.h"
 #include "script/script_quickjs.h"
 #include "utils/file_extra.h"
@@ -37,6 +38,10 @@ void copyNodes(std::vector<Proxy> &source, std::vector<Proxy> &dest)
 
 int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_settings &parse_set)
 {
+    const auto report = parse_set.source_registry ? parse_set.source_registry->Report : std::shared_ptr<ConversionReport>{};
+    if(report) report->beginSource(link);
+    if(report && report->request_failure=="LIMIT_EXCEEDED") return -1;
+    if(report && startsWith(link,"script:")) {report->request_failure="REQUEST_UNVERIFIED";return -1;}
     std::string &proxy = *parse_set.proxy, &subInfo = *parse_set.sub_info;
     string_array &exclude_remarks = *parse_set.exclude_remarks;
     string_array &include_remarks = *parse_set.include_remarks;
@@ -154,9 +159,15 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
                      "Subscription proxy route configuration is invalid; refusing fetch.");
             return -1;
         }
+        FetchProvenance provenance;
         strSub = webGet(
             link, selected_proxy, global.cacheSubscription,
-            &extra_headers, request_headers, route_matched);
+            &extra_headers, request_headers, route_matched, report ? &provenance : nullptr);
+        if(report)
+        {
+            report->sources[report->current].fetch_context_sha256=provenance.context_sha256;
+            report->sources[report->current].provenance=provenance.origin;
+        }
         /*
         if(strSub.size() == 0)
         {
@@ -173,6 +184,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         */
         if(!strSub.empty())
         {
+            if(report) { report->sourceContent(strSub); if(!report->canParseSource()) return -1; }
             writeLog(LOG_TYPE_INFO, "Parsing subscription data...");
             if(explodeConfContent(strSub, nodes, parse_set.source_registry) == 0)
             {
@@ -208,7 +220,10 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         if(!authorized)
             return -1;
         writeLog(LOG_TYPE_INFO, "Parsing configuration file data...");
-        if(explodeConfContent(fileGet(link), nodes, parse_set.source_registry) == 0)
+        strSub = fileGet(link);
+        if(report) report->sources[report->current].provenance="local";
+        if(report) { report->sourceContent(strSub); if(!report->canParseSource()) return -1; }
+        if(explodeConfContent(strSub, nodes, parse_set.source_registry) == 0)
         {
             writeLog(LOG_TYPE_ERROR, "Invalid configuration file!");
             return -1;
@@ -232,6 +247,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         break;
     default:
     {
+        if(report) { report->sourceContent(link); if(!report->canParseSource()) return -1; }
         explode(link, node, parse_set.source_registry);
         if(node.Type == ProxyType::Unknown)
         {

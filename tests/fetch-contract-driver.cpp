@@ -18,6 +18,7 @@ int main(int argc, char **argv) {
     string_icase_map headers;
     if (std::string(argv[7]) != "-") headers["Authorization"] = argv[7];
     std::string body, response_headers;
+    FetchProvenance provenance;
     int status = -1;
     int transport = -1, upstream = -1;
     bool force = std::stoi(argv[6]);
@@ -31,7 +32,7 @@ int main(int argc, char **argv) {
         transport = result.transport_code;
         upstream = result.upstream_http_status;
     } else {
-        body = webGet(argv[2], proxy, ttl, &response_headers, &headers, force);
+        body = webGet(argv[2], proxy, ttl, &response_headers, &headers, force, &provenance);
     }
     nlohmann::json j;
     j["body"] = body;
@@ -39,6 +40,8 @@ int main(int argc, char **argv) {
     j["status"] = status;
     j["transport"] = transport;
     j["upstream_status"] = upstream;
+    j["fetch_context_sha256"] = provenance.context_sha256;
+    j["provenance"] = provenance.origin;
     j["curl_runtime"] = curl_version_info(CURLVERSION_NOW)->version;
     j["curl_headers"] = LIBCURL_VERSION;
     j["label"] = argv[8];

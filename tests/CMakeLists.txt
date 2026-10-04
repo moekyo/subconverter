@@ -48,3 +48,11 @@ add_executable(chain-convert chain-convert.cpp)
 target_compile_definitions(chain-convert PRIVATE NO_JS_RUNTIME NO_WEBGET)
 target_include_directories(chain-convert PRIVATE ${RAPIDJSON_INCLUDE_DIRS} ${YAML_CPP_INCLUDE_DIRS})
 target_link_libraries(chain-convert PRIVATE subconverter)
+
+add_executable(completeness-convert completeness-convert.cpp)
+target_compile_definitions(completeness-convert PRIVATE NO_JS_RUNTIME NO_WEBGET)
+target_include_directories(completeness-convert PRIVATE ${RAPIDJSON_INCLUDE_DIRS} ${YAML_CPP_INCLUDE_DIRS})
+target_link_libraries(completeness-convert PRIVATE subconverter)
+
+add_executable(plugin-options-contract plugin-options-contract.cpp)
+target_include_directories(plugin-options-contract PRIVATE ../src)

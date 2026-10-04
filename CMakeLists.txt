@@ -52,6 +52,8 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/main.cpp
     src/parser/infoparser.cpp
     src/parser/subparser.cpp
+    src/parser/conversion_report.cpp
+    src/parser/conversion_uri.cpp
     src/script/cron.cpp
     src/script/script_quickjs.cpp
 #    src/server/webserver_libevent.cpp
@@ -132,6 +134,8 @@ ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
     src/generator/template/templates.cpp
     src/lib/wrapper.cpp
     src/parser/subparser.cpp
+    src/parser/conversion_report.cpp
+    src/parser/conversion_uri.cpp
     src/utils/base64/base64.cpp
     src/utils/codepage.cpp
     src/utils/logger.cpp
