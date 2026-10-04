@@ -404,7 +404,7 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist, string
 
 void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext)
 {
-    YAML::Node proxies, original_groups;
+    YAML::Node proxies, original_groups(YAML::NodeType::Sequence);
     std::map<std::string, YAML::Node> validation_groups;
     std::set<std::string> provider_names, generated_empty;
     std::vector<Proxy> nodelist;
@@ -416,6 +416,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         chains.groups = {"DIRECT", "REJECT", "REJECT-DROP", "COMPATIBLE", "PASS", "PASS-RULE"};
         const auto builtin_names = chains.groups;
         const char *key = ext.clash_new_field_name ? "proxy-groups" : "Proxy Group";
+        // Keep one final sequence for both serialization and graph validation.
+        // Clone the base so generated replacements do not mutate YAML aliases
+        // or leave a second, stale copy for the public wrapper to merge later.
+        if(yamlnode[key].IsSequence()) original_groups.reset(YAML::Clone(yamlnode[key]));
         if(yamlnode[key].IsSequence()) for(const auto &group : yamlnode[key])
             if(group.IsMap() && group["name"].IsDefined() && group["name"].IsScalar())
             {
@@ -993,13 +997,15 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             singlegroup.SetStyle(YAML::EmitterStyle::Flow);
 
         if(x.Name == "DIRECT" || x.Name == "REJECT" || x.Name == "REJECT-DROP" || x.Name == "COMPATIBLE" || x.Name == "PASS" || x.Name == "PASS-RULE") chains.invalid_groups.insert(x.Name);
-        validation_groups[x.Name].reset(singlegroup);
         bool replace_flag = false;
-        for(auto && original_group : original_groups)
+        for(size_t i = 0; i < original_groups.size(); ++i)
         {
-            if(original_group["name"].as<std::string>() == x.Name)
+            const auto original_group = static_cast<const YAML::Node &>(original_groups)[i];
+            if(original_group.IsMap() && original_group["name"].IsDefined() && original_group["name"].IsScalar() && original_group["name"].as<std::string>() == x.Name)
             {
-                original_group.reset(singlegroup);
+                // Indexed assignment writes the sequence element; reset on
+                // an iterator value would only rebind its temporary handle.
+                original_groups[i] = singlegroup;
                 replace_flag = true;
                 break;
             }
@@ -1025,6 +1031,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         else
             yamlnode.remove("Proxy Group");
     }
+    validation_groups.clear();
+    for(const auto &group : original_groups)
+        if(group.IsMap() && group["name"].IsDefined() && group["name"].IsScalar())
+            validation_groups[group["name"].as<std::string>()].reset(group);
     for(const auto &[name, group] : clash_group_graph::build(proxies, validation_groups, provider_names, generated_empty))
     {
         chains.group(name, group.members, group.opaque);

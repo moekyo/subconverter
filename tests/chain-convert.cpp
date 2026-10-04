@@ -54,7 +54,7 @@ int main(int argc, char **argv)
         const auto request = json::parse(std::string(std::istreambuf_iterator<char>(std::cin), {}));
         extra_settings ext;
         ext.enable_rule_generator = false;
-        ext.clash_new_field_name = true;
+        ext.clash_new_field_name = request.value("clash_new_field_name", true);
         ext.clash_proxies_style = "block";
         ext.clash_proxy_groups_style = "block";
         ext.nodelist = request.value("list", false);

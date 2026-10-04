@@ -22,10 +22,9 @@ OPTION(USING_MALLOC_TRIM "Call malloc_trim after processing request to lower mem
 #OPTION(USING_MBEDTLS "Use mbedTLS instead of OpenSSL for MD5 calculation." OFF)
 OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essential part." OFF)
 
-# Keep the upstream Clash exporter byte-for-byte intact and compile its two
-# overloads under private legacy symbols. subexport_clash_preserve.cpp exposes
-# the public symbols and adds generic preservation of proxy groups declared by
-# the Clash base before custom groups are generated.
+# Compile the conversion implementation under private legacy symbols. The
+# public wrapper handles rule rendering; group construction and validation
+# share the same final sequence inside the conversion implementation.
 SET_SOURCE_FILES_PROPERTIES(
     src/generator/config/subexport.cpp
     PROPERTIES COMPILE_DEFINITIONS "proxyToClash=proxyToClashLegacy")

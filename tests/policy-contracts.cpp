@@ -61,6 +61,7 @@ proxy-groups:
             graph[names[i]] = groups[i];
         }
         auto check = graph["Safe fallback"];
+        require(graph["SameName"]["proxies"].size() == 1 && graph["SameName"]["proxies"][0].as<std::string>() == "REJECT", "same-name group members replaced");
         require(check["lazy"].as<bool>() == false, "fallback lazy false");
         require(check["timeout"].as<int>() == 3000, "fallback timeout");
         require(check["tolerance"].as<int>() == 50, "fallback tolerance");
