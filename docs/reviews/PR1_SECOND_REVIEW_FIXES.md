@@ -1,5 +1,7 @@
 # PR #1 第二轮复审修复（2026-10-04）
 
+本页保留第二轮历史记录。第三轮确认同名组覆盖的旧测试仅检查了数量/状态，且可空 transport 的三个负控过严；修正与当前证据见 [第三轮修复](PR1_THIRD_REVIEW_FIXES.md)。
+
 本轮从 `03f28a80ce2936468af5688ecfde3a573ca0f596` 开始，只修复第二轮完整评估的 F1、C1、F2、H1。F1/F2 是相对 `e624f326` 的回归；C1 是新链保护的覆盖缺口；H1 是新分派扩大旧 schema 假设的可达范围。原六项修复与测试仍保留，PR 继续为 Draft。
 
 ## 四项修改
@@ -19,7 +21,7 @@ V2Ray JSON 的 users 空数组、首项 null/空对象、缺失/空/非字符串
 
 ## 本地自动组的准确范围
 
-图模型只用于校验，保留原 base group 的自动字段与 provider 声明。最终节点集合经过目标省略、过滤、改名、协议前缀、同名后缀；同名生成组按既有 wrapper 语义整体替换 base group。生成组因为无匹配而渲染的历史 DIRECT 回退仍单独标为空，不能被误认为用户显式选择 DIRECT。
+图模型只用于校验，保留原 base group 的自动字段与 provider 声明。最终节点集合经过目标省略、过滤、改名、协议前缀、同名后缀；此时同名生成组覆盖只验证了模型，未验证实际最终序列；该缺口已在第三轮修复。生成组因为无匹配而渲染的历史 DIRECT 回退仍单独标为空，不能被误认为用户显式选择 DIRECT。
 
 - filter 只筛选自动加入的节点；显式 proxies 不被 include filter 删除。反引号分隔多个表达式。
 - exclude-filter 与 exclude-type 作用于显式和自动成员；类型按 Mihomo AdapterType.String() 比较，例如 Shadowsocks，而不是 YAML 别名 ss。ASCII 大小写不敏感，`|` 分隔且不擅自 trim。

@@ -1,6 +1,6 @@
 # 独立评估对照与分期验收（2026-10-03）
 
-本页保留第一轮评估记录。PR #1 后续六项 finding 的修复、当前测试与兼容边界见 [2026-10-04 六项复审修复](PR1_REVIEW_FIXES.md)；后续自动组/容器边界与当前限定见 [第二轮修复](PR1_SECOND_REVIEW_FIXES.md)。
+本页保留第一轮评估记录。PR #1 后续六项 finding 的修复、当前测试与兼容边界见 [2026-10-04 六项复审修复](PR1_REVIEW_FIXES.md)；后续自动组/容器记录见 [第二轮修复](PR1_SECOND_REVIEW_FIXES.md)，最终组合并与兼容边界修正见 [第三轮修复](PR1_THIRD_REVIEW_FIXES.md)。
 
 ## 决策
 
@@ -100,7 +100,7 @@
 
 - 生产 C++ static conversion library：原 REALITY 四组合，混合协议/字段/负控测试；不是抽取函数替代实现。
 - 固定官方 Mihomo v1.19.29 配置解析：18 个合成节点，block/flow × full/list。不是认证、TCP/UDP、DNS 或出口 IP 验证。
-- 合成 146 节点 / 44426 条有序规则：node 顺序、base/DNP 组、同名覆盖、类型 matcher、已有健康字段、首匹配去重、明确保护图中无 DIRECT、空集 REJECT。此规模不是生产输入完整性的替代 oracle。
+- 合成 146 节点 / 44426 条有序规则：node 顺序、base/DNP 组、同名覆盖、类型 matcher、已有健康字段、首匹配去重、明确保护图中无 DIRECT、空集 REJECT。此规模不是生产输入完整性的替代 oracle；最初同名覆盖仅核数量/顺序，第三轮已补最终成员断言与修复。
 - `tolerance` / `evaluate-before-use` 的断言证明 YAML 契约保留，不证明 pinned Mihomo fallback 运行时采用这些字段。
 - 旧输出正向差分用于保护既有正常路径；报告指出的旧 bug 单独以正确预期的红测修复。
 - ASan/UBSan 可以运行；本云环境的 LeakSanitizer 受 ptrace 限制，不能声称 leak 检查通过。
