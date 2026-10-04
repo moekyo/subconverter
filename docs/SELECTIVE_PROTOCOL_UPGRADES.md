@@ -4,6 +4,8 @@ The integration is based on `moekyo/subconverter@37761233af84b2ffc8ef1112da55375
 
 See [the review reconciliation and remaining P0 gates](reviews/PRO_REVIEW_RECONCILIATION.md). AnyTLS, HY1/HY2 and Clash VLESS REALITY already existed; their fixes are not advertised as newly added protocols.
 
+The PR #1 follow-up fixes and exact full-output validation are recorded in [the six-finding review response](reviews/PR1_REVIEW_FIXES.md). Incomplete chains now fail full-config conversion; node lists prune unresolved dependencies. URI IPv6 zones remain unsupported.
+
 ## Tested input and output scope
 
 Clash `proxies` / legacy `Proxy` mappings, including JSON object form, feed the existing typed model. Plaintext and Base64 URI feeds can mix SS, SSR, VMess, Trojan, VLESS, HY2, AnyTLS and TUIC. This is not a general Xray or sing-box JSON importer. Bare YAML arrays are not newly enabled.
@@ -35,6 +37,8 @@ Dependencies: C++20 compiler, CMake, pkg-config, yaml-cpp, RapidJSON, PCRE2 and 
 python3 tests/reality-roundtrip.py
 python3 tests/protocol-roundtrip.py
 python3 tests/pro-review-regressions.py
+# After the build, validate full chain configs with the verified pinned core:
+# python3 tests/chain-regressions.py --driver build/reality-roundtrip/chain-convert --mihomo /path/to/mihomo --artifacts build/chain-evidence
 # Optional real-curl tests, using synthetic 127.0.0.1 services only.
 cmake -S tests -B build/reality-roundtrip -DBUILD_FETCH_TESTS=ON
 cmake --build build/reality-roundtrip -j2

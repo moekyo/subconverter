@@ -2,7 +2,7 @@
 
 This fork directly adds fallback health-check field support in the source code for Mihomo usage — no build-time patching.
 
-For the selective protocol work, tested matrix, limitations, and remaining security gates, see [Selective protocol upgrades](docs/SELECTIVE_PROTOCOL_UPGRADES.md).
+For the selective protocol work, tested matrix, limitations, and remaining security gates, see [Selective protocol upgrades](docs/SELECTIVE_PROTOCOL_UPGRADES.md) and [PR #1 review fixes](docs/reviews/PR1_REVIEW_FIXES.md).
 
 ## What this build adds
 
