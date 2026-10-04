@@ -1,5 +1,7 @@
 # PR #1 六项复审修复（2026-10-04）
 
+此页保留第一轮六项修复记录；新增发现与当前保证范围见 [第二轮修复](PR1_SECOND_REVIEW_FIXES.md)。
+
 本轮以已发布的 `e624f326c5f8a028d05d88862114f0ff2a75a20f` 为修复起点，核对完整 545 行 PR 独立评估。R1/R3/R4/R6 是旧可用路径的新回归；R2 是新增链保真没有覆盖完整生命周期，R5 是新增 raw 订阅入口的格式隔离不完整。六项均先以固定 base/head 合成对照复现，再修复。PR 继续为 Draft。
 
 | Finding | 修复 | 验收要点 |
@@ -21,7 +23,7 @@ Clash、Surge、sing-box 只认可当前目标真正保留或生成的组。Clas
 
 行为变化是明确的：
 
-- **完整配置**遇到无法保留的链会设置转换失败并返回空结果，避免继续生成因链丢失而回落 DIRECT 的策略。HTTP handler 在上传前检查失败，并返回现有 400 错误形式。此 HTTP 分支已作源码审查，未运行完整服务请求。
+- **完整配置**遇到已建模且无法保留的链会设置转换失败并返回空结果，避免继续生成因链丢失而回落 DIRECT 的策略。HTTP handler 在上传前检查失败，并返回现有 400 错误形式。此 HTTP 分支已作源码审查，未运行完整服务请求。
 - **节点列表**可保留独立有效节点，并拒绝不完整链及其级联依赖；未知外部组不能凭名字猜测存在。日志继续使用固定原因，不输出输入秘密。列表仍不是完整 source/node/field manifest。
 - 导出使用目标内的名字/拒绝状态；不会把改名或省略结果写回源图。sing-box 的源副本活到 JSON 序列化完成，避免 StringRef 悬空。
 
@@ -63,6 +65,6 @@ bash tests/modern-mihomo-contract.sh
 
 IPv6 zone-qualified/scoped URI 与代理地址没有被建模，当前明确拒绝，不删除 zone 后假造成功。此处替换的是共享 URI/代理地址校验，不宣称旧通用 isIPv6 的所有调用都已升级。
 
-Surge AnyTLS 输入丢证书 pin/underlying-proxy 的基线缺口没有在本轮实现通用修复。其 base/head 对照仍表明输入阶段可能丢字段，因此跨目标输出 pin guard 不代表任意 AnyTLS 输入完整保真。TUIC 仍为 EXPERIMENTAL。
+Surge 输入链字段的基线缺口没有在本轮实现通用修复，已确认 SS 与 AnyTLS；AnyTLS 还可能丢证书 pin。其 base/head 对照仍表明输入阶段可能丢字段，因此跨目标输出 pin guard 不代表任意 AnyTLS 输入完整保真。TUIC 仍为 EXPERIMENTAL。
 
 此前的完整转换 report/API、admin 发布门槛、原子配置 reload、URL/redirect 策略、真实构建身份和 stale provenance、HTTPS 验证默认策略仍按 [原评估剩余 P0](PRO_REVIEW_RECONCILIATION.md) 单独处理。

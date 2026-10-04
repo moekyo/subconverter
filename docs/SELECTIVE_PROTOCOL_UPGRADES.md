@@ -4,7 +4,7 @@ The integration is based on `moekyo/subconverter@37761233af84b2ffc8ef1112da55375
 
 See [the review reconciliation and remaining P0 gates](reviews/PRO_REVIEW_RECONCILIATION.md). AnyTLS, HY1/HY2 and Clash VLESS REALITY already existed; their fixes are not advertised as newly added protocols.
 
-The PR #1 follow-up fixes and exact full-output validation are recorded in [the six-finding review response](reviews/PR1_REVIEW_FIXES.md). Incomplete chains now fail full-config conversion; node lists prune unresolved dependencies. URI IPv6 zones remain unsupported.
+The PR #1 follow-up fixes and exact full-output validation are recorded in [the six-finding review response](reviews/PR1_REVIEW_FIXES.md). The [second review response](reviews/PR1_SECOND_REVIEW_FIXES.md) records automatic-group, early identity, container and JSON-shape repairs. Modeled incomplete chains fail full-config conversion; node lists prune unresolved dependencies. Surge input chains, SSID and dynamic provider members remain outside the complete guarantee. URI IPv6 zones remain unsupported.
 
 ## Tested input and output scope
 
