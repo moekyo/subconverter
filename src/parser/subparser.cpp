@@ -365,7 +365,6 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes, SourceRegi
 {
     if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     Document json;
-    rapidjson::Value nodejson, settings;
     std::string group, ps, add, port, type, id, aid, net, path, host, edge, tls, cipher, subid, sni;
     tribool udp, tfo, scv;
     int configType;
@@ -380,96 +379,105 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes, SourceRegi
     json.Parse(content.data());
     if(json.HasParseError() || !json.IsObject())
         return;
-    try
+    if(json.HasMember("outbounds")) //single config
     {
-        if(json.HasMember("outbounds")) //single config
+        // Validate every container before indexing or asking for object members.
+        // RapidJSON assertions are not a stable error boundary across builds.
+        const auto &outbounds = json["outbounds"];
+        if(!outbounds.IsArray() || outbounds.Empty() || !outbounds[0].IsObject()) return;
+        const auto &outbound = outbounds[0];
+        if(!outbound.HasMember("settings") || !outbound["settings"].IsObject()) return;
+        const auto &config = outbound["settings"];
+        if(!config.HasMember("vnext") || !config["vnext"].IsArray() || config["vnext"].Empty() || !config["vnext"][0].IsObject()) return;
+        const auto &server = config["vnext"][0];
+        add = GetMember(server, "address");
+        port = GetMember(server, "port");
+        auto source_record = registry->reserve(add + ":" + port);
+        if(add.empty() || port.empty() || port == "0" || !server.HasMember("users") || !server["users"].IsArray() || server["users"].Empty() || !server["users"][0].IsObject()) return;
+        const auto &user = server["users"][0];
+        if(!user.HasMember("id") || !user["id"].IsString() || user["id"].GetStringLength() == 0) return;
+        id = GetMember(user, "id");
+        aid = GetMember(user, "alterId");
+        cipher = GetMember(user, "security");
+        const auto optionalObject = [](const rapidjson::Value &object, const std::string &key) {
+            return !object.HasMember(key.c_str()) || object[key.c_str()].IsObject();
+        };
+        if(!optionalObject(outbound, streamset)) return;
+        if(outbound.HasMember(streamset.c_str()))
         {
-            if(json["outbounds"].Size() > 0 && json["outbounds"][0].HasMember("settings") && json["outbounds"][0]["settings"].HasMember("vnext") && json["outbounds"][0]["settings"]["vnext"].Size() > 0)
+            const auto &stream = outbound[streamset.c_str()];
+            net = GetMember(stream, "network");
+            tls = GetMember(stream, "security");
+            if(!optionalObject(stream, wsset) || !optionalObject(stream, tcpset)) return;
+            if(net == "ws" && stream.HasMember(wsset.c_str()))
             {
-                Proxy node;
-                nodejson = json["outbounds"][0];
-                add = GetMember(nodejson["settings"]["vnext"][0], "address");
-                port = GetMember(nodejson["settings"]["vnext"][0], "port");
-                auto source_record = registry->reserve(add + ":" + port);
-                if(port == "0")
-                    return;
-                if(nodejson["settings"]["vnext"][0]["users"].Size())
+                const auto &ws = stream[wsset.c_str()];
+                path = GetMember(ws, "path");
+                if(!optionalObject(ws, "headers")) return;
+                if(ws.HasMember("headers"))
                 {
-                    id = GetMember(nodejson["settings"]["vnext"][0]["users"][0], "id");
-                    aid = GetMember(nodejson["settings"]["vnext"][0]["users"][0], "alterId");
-                    cipher = GetMember(nodejson["settings"]["vnext"][0]["users"][0], "security");
+                    host = GetMember(ws["headers"], "Host");
+                    edge = GetMember(ws["headers"], "Edge");
                 }
-                if(nodejson.HasMember(streamset.data()))
-                {
-                    net = GetMember(nodejson[streamset.data()], "network");
-                    tls = GetMember(nodejson[streamset.data()], "security");
-                    if(net == "ws")
-                    {
-                        if(nodejson[streamset.data()].HasMember(wsset.data()))
-                            settings = nodejson[streamset.data()][wsset.data()];
-                        else
-                            settings.RemoveAllMembers();
-                        path = GetMember(settings, "path");
-                        if(settings.HasMember("headers"))
-                        {
-                            host = GetMember(settings["headers"], "Host");
-                            edge = GetMember(settings["headers"], "Edge");
-                        }
-                    }
-                    if(nodejson[streamset.data()].HasMember(tcpset.data()))
-                        settings = nodejson[streamset.data()][tcpset.data()];
-                    else
-                        settings.RemoveAllMembers();
-                    if(settings.IsObject() && settings.HasMember("header"))
-                    {
-                        type = GetMember(settings["header"], "type");
-                        if(type == "http")
-                        {
-                            if(settings["header"].HasMember("request"))
-                            {
-                                if(settings["header"]["request"].HasMember("path") && settings["header"]["request"]["path"].Size())
-                                    settings["header"]["request"]["path"][0] >> path;
-                                if(settings["header"]["request"].HasMember("headers"))
-                                {
-                                    host = GetMember(settings["header"]["request"]["headers"], "Host");
-                                    edge = GetMember(settings["header"]["request"]["headers"], "Edge");
-                                }
-                            }
-                        }
-                    }
-                }
-                vmessConstruct(node, V2RAY_DEFAULT_GROUP, add + ":" + port, add, port, type, id, aid, net, cipher, path, host, edge, tls, "", udp, tfo, scv);
-                attachSourceIdentity(node, registry, source_record);
-        nodes.emplace_back(std::move(node));
             }
-            return;
+            if(stream.HasMember(tcpset.c_str()))
+            {
+                const auto &tcp = stream[tcpset.c_str()];
+                if(!optionalObject(tcp, "header")) return;
+                if(tcp.HasMember("header"))
+                {
+                    const auto &header = tcp["header"];
+                    type = GetMember(header, "type");
+                    if(!optionalObject(header, "request")) return;
+                    if(type == "http" && header.HasMember("request"))
+                    {
+                        const auto &request = header["request"];
+                        if(request.HasMember("path"))
+                        {
+                            if(!request["path"].IsArray()) return;
+                            for(const auto &item : request["path"].GetArray()) if(!item.IsString()) return;
+                            if(!request["path"].Empty()) request["path"][0] >> path;
+                        }
+                        if(!optionalObject(request, "headers")) return;
+                        if(request.HasMember("headers"))
+                        {
+                            host = GetMember(request["headers"], "Host");
+                            edge = GetMember(request["headers"], "Edge");
+                        }
+                    }
+                }
+            }
         }
+        Proxy node;
+        vmessConstruct(node, V2RAY_DEFAULT_GROUP, add + ":" + port, add, port, type, id, aid, net, cipher, path, host, edge, tls, "", udp, tfo, scv);
+        attachSourceIdentity(node, registry, source_record);
+        nodes.emplace_back(std::move(node));
+        return;
     }
-    catch(std::exception & e)
-    {
-        //writeLog(0, "VMessConf parser throws an error. Leaving...", LOG_LEVEL_WARNING);
-        //return;
-        //ignore
-        throw;
-    }
+    if(!json.HasMember("subItem") || !json["subItem"].IsArray() ||
+       !json.HasMember("vmess") || !json["vmess"].IsArray()) return;
     //read all subscribe remark as group name
-    for(uint32_t i = 0; i < json["subItem"].Size(); i++)
-        subdata.insert(std::pair<std::string, std::string>(json["subItem"][i]["id"].GetString(), json["subItem"][i]["remarks"].GetString()));
+    for(const auto &item : json["subItem"].GetArray())
+        if(item.IsObject() && item.HasMember("id") && item["id"].IsString() && item.HasMember("remarks") && item["remarks"].IsString())
+            subdata.emplace(item["id"].GetString(), item["remarks"].GetString());
 
     for(uint32_t i = 0; i < json["vmess"].Size(); i++)
     {
         Proxy node;
+        if(!json["vmess"][i].IsObject()) continue;
+        const auto &item = json["vmess"][i];
+        if(!item.HasMember("address") || !item.HasMember("port") || !item.HasMember("id")) continue;
         auto source_record = registry->reserve(GetMember(json["vmess"][i], "remarks"));
         if(json["vmess"][i]["address"].IsNull() || json["vmess"][i]["port"].IsNull() || json["vmess"][i]["id"].IsNull())
             continue;
 
         //common info
-        json["vmess"][i]["remarks"] >> ps;
-        json["vmess"][i]["address"] >> add;
+        ps = GetMember(item, "remarks");
+        add = GetMember(item, "address");
         port = GetMember(json["vmess"][i], "port");
         if(port == "0")
             continue;
-        json["vmess"][i]["subid"] >> subid;
+        subid = GetMember(item, "subid");
 
         if(!subid.empty())
         {
@@ -480,25 +488,26 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes, SourceRegi
         if(ps.empty())
             ps = add + ":" + port;
 
+        configType = 0;
         scv = GetMember(json["vmess"][i], "allowInsecure");
-        json["vmess"][i]["configType"] >> configType;
+        if(item.HasMember("configType")) item["configType"] >> configType;
         switch(configType)
         {
         case 1: //vmess config
-            json["vmess"][i]["headerType"] >> type;
-            json["vmess"][i]["id"] >> id;
-            json["vmess"][i]["alterId"] >> aid;
-            json["vmess"][i]["network"] >> net;
-            json["vmess"][i]["path"] >> path;
-            json["vmess"][i]["requestHost"] >> host;
-            json["vmess"][i]["streamSecurity"] >> tls;
-            json["vmess"][i]["security"] >> cipher;
-            json["vmess"][i]["sni"] >> sni;
+            type = GetMember(item, "headerType");
+            id = GetMember(item, "id");
+            aid = GetMember(item, "alterId");
+            net = GetMember(item, "network");
+            path = GetMember(item, "path");
+            host = GetMember(item, "requestHost");
+            tls = GetMember(item, "streamSecurity");
+            cipher = GetMember(item, "security");
+            sni = GetMember(item, "sni");
             vmessConstruct(node, V2RAY_DEFAULT_GROUP, ps, add, port, type, id, aid, net, cipher, path, host, "", tls, sni, udp, tfo, scv);
             break;
         case 3: //ss config
-            json["vmess"][i]["id"] >> id;
-            json["vmess"][i]["security"] >> cipher;
+            id = GetMember(item, "id");
+            cipher = GetMember(item, "security");
             ssConstruct(node, SS_DEFAULT_GROUP, ps, add, port, id, cipher, "", "", udp, tfo, scv);
             break;
         case 4: //socks config
@@ -1235,6 +1244,9 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes, const SourceRegistry
     const std::string section = yamlnode["proxies"].IsDefined() ? "proxies" : "Proxy";
     for(uint32_t i = 0; i < yamlnode[section].size(); i++)
     {
+        // A malformed name must not erase an otherwise visible chain declaration.
+        // Keep the anonymous row rejected until its identity and fields are valid.
+        auto source_record = registry->reserve("");
         try
         {
         std::string proxytype, ps, server, port, cipher, group, password, underlying_proxy; //common
@@ -1250,12 +1262,21 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes, const SourceRegistry
         Node singleproxy;
         Proxy node;
         singleproxy = yamlnode[section][i];
-        singleproxy["name"] >>= ps;
-        auto source_record = registry->reserve(ps);
+        if(!singleproxy.IsMap())
+        {
+            writeLog(0, "Skipped malformed Clash node (content redacted)", LOG_LEVEL_WARNING);
+            continue;
+        }
         for(const char *key : {"dialer-proxy", "underlying-proxy"})
             if(singleproxy[key].IsDefined() && (!singleproxy[key].IsScalar() || !singleproxy[key].as<std::string>().empty())) source_record->ChainDeclared = true;
         if(singleproxy["dialer-proxy"].IsScalar()) source_record->Dependency = singleproxy["dialer-proxy"].as<std::string>();
         else if(singleproxy["underlying-proxy"].IsScalar()) source_record->Dependency = singleproxy["underlying-proxy"].as<std::string>();
+        if(!singleproxy["name"].IsScalar() || (ps = singleproxy["name"].as<std::string>()).empty())
+        {
+            writeLog(0, "Skipped Clash node: invalid or missing name (content redacted)", LOG_LEVEL_WARNING);
+            continue;
+        }
+        source_record->Name = ps;
         singleproxy["type"] >>= proxytype;
         singleproxy["server"] >>= server;
         singleproxy["port"] >>= port;
@@ -2980,7 +3001,7 @@ void explode(const std::string &link, Proxy &node, SourceRegistry registry)
     if(node.Type != ProxyType::Unknown) attachSourceIdentity(node, registry);
 }
 
-static bool isRawUriSubscription(const std::string &content)
+static bool isRawUriSubscription(const std::string &content, bool first_line_only = false)
 {
     std::stringstream lines(content);
     std::string line;
@@ -2988,7 +3009,8 @@ static bool isRawUriSubscription(const std::string &content)
     {
         line = trim(line);
         if(line.empty() || line.front() == '#') continue;
-        return regFind(line, "^[A-Za-z][A-Za-z0-9+.-]*://");
+        if(regFind(line, "^[A-Za-z][A-Za-z0-9+.-]*://")) return true;
+        if(first_line_only) return false;
     }
     return false;
 }
@@ -3000,6 +3022,26 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes, SourceRegistry regis
     std::string strLink;
     bool processed = false;
     const bool raw_uri = isRawUriSubscription(sub);
+    std::string first_line;
+    bool yaml_preamble = false;
+    std::stringstream first_lines(sub);
+    while(std::getline(first_lines, first_line))
+    {
+        first_line = trim(first_line);
+        if(first_line.empty() || first_line.front() == '#' || first_line.front() == ';' || startsWith(first_line, "//")) continue;
+        if(startsWith(first_line, "%YAML ") || startsWith(first_line, "%TAG ")) { yaml_preamble = true; continue; }
+        if(regFind(first_line, R"(^---(?:\s|$))"))
+        {
+            yaml_preamble = true;
+            first_line = trim(first_line.substr(3));
+            if(first_line.empty() || first_line.front() == '#') continue;
+        }
+        break;
+    }
+    const bool ini_container = !yaml_preamble && !regFind(first_line, "^[A-Za-z][A-Za-z0-9+.-]*://") &&
+        (regFind(first_line, R"(^\[[A-Za-z][A-Za-z0-9 _-]*\]$)") ||
+         regFind(first_line, R"(^[^=]+\s*=\s*(ss|custom|vmess|trojan|anytls|socks5|http|https|snell|direct|reject)\s*(,|$))") ||
+         regFind(first_line, R"(^(shadowsocks|vmess|trojan|anytls|http)\s*=)"));
 
     //try to parse as SSD configuration
     if(startsWith(sub, "ssd://"))
@@ -3008,32 +3050,54 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes, SourceRegistry regis
         processed = true;
     }
 
-    //try to parse as clash configuration
-    try
+    if(!processed && ini_container)
     {
-        if(!processed && !raw_uri && regFind(sub, "\"?(Proxy|proxies)\"?:"))
+        explodeSurge(sub, nodes, registry);
+        processed = true; // Container identity does not depend on accepted rows.
+    }
+
+    // Recognized containers take precedence over URI-looking text inside a
+    // block scalar, comment or metadata. A bad first line does not decide the
+    // encoding of an otherwise plaintext URI feed.
+    if(!processed)
+    {
+        Node yamlnode;
+        try { yamlnode = Load(sub); }
+        catch(const YAML::Exception &) {} // Plain URI feeds need not be YAML.
+        if(yamlnode.IsMap())
         {
-            regGetMatch(sub, R"(^(?:Proxy|proxies):$\s(?:(?:^ +?.*$| *?-.*$|)\s?)+)", 1, &sub);
-            Node yamlnode = Load(sub);
-            if(yamlnode.size() && (yamlnode["Proxy"].IsDefined() || yamlnode["proxies"].IsDefined()))
+            if(yamlnode["proxies"].IsDefined() || yamlnode["Proxy"].IsDefined())
             {
-                explodeClash(yamlnode, nodes, registry);
+                const auto entries = yamlnode["proxies"].IsDefined() ? yamlnode["proxies"] : yamlnode["Proxy"];
+                if(entries.IsSequence()) explodeClash(yamlnode, nodes, registry);
+                else writeLog(0, "Skipped malformed subscription container (content redacted)", LOG_LEVEL_WARNING);
+                processed = true;
+            }
+            else if(!isRawUriSubscription(sub, true))
+            {
+                // Unknown structured YAML is not a bag of URI lines.
+                writeLog(0, "Skipped unsupported subscription container (content redacted)", LOG_LEVEL_WARNING);
                 processed = true;
             }
         }
-    }
-    catch (std::exception &e)
-    {
-        //writeLog(0, e.what(), LOG_LEVEL_DEBUG);
-        //ignore
-        throw;
+        else if(yamlnode.IsSequence() || (yamlnode.IsScalar() && (yaml_preamble || (!first_line.empty() &&
+                std::string("|>\"'!&").find(first_line.front()) != std::string::npos))))
+        {
+            writeLog(0, "Skipped unsupported subscription container (content redacted)", LOG_LEVEL_WARNING);
+            processed = true;
+        }
     }
 
-    //try to parse as surge configuration
-    if(!processed && !raw_uri && explodeSurge(sub, nodes, registry))
+    if(!processed && (yaml_preamble || (!first_line.empty() &&
+            std::string("[{|>\"'!&").find(first_line.front()) != std::string::npos)))
     {
+        // A declared but malformed container still owns its contents. Never
+        // salvage URI-looking metadata from its failed parse as a raw feed.
+        writeLog(0, "Skipped malformed or unsupported subscription container (content redacted)", LOG_LEVEL_WARNING);
         processed = true;
     }
+    if(!processed && !raw_uri && explodeSurge(sub, nodes, registry))
+        processed = true;
 
     //try to parse as normal subscription
     if(!processed)
@@ -3041,11 +3105,14 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes, SourceRegistry regis
         // A mixed plaintext URI subscription must not be Base64-decoded again.
         // Unknown schemes remain visible to the unsupported-entry diagnostics.
         if(!raw_uri)
-            sub = urlSafeBase64Decode(sub);
-        if(!isRawUriSubscription(sub) && regFind(sub, "(vmess|shadowsocks|http|trojan)\\s*?="))
         {
-            if(explodeSurge(sub, nodes, registry))
-                return;
+            const auto decoded = urlSafeBase64Decode(sub);
+            // Re-enter structural dispatch: encoded YAML/INI must not expose
+            // URI-looking metadata when all of its real nodes are rejected.
+            // Decoding strictly reduces length, so invalid text cannot recurse indefinitely.
+            if(!decoded.empty() && decoded.size() < sub.size()) explodeConfContent(decoded, nodes, registry);
+            else writeLog(0, "Skipped invalid or unsupported subscription entry (content redacted)", LOG_LEVEL_WARNING);
+            return;
         }
         strstream << sub;
         char delimiter = count(sub.begin(), sub.end(), '\n') < 1 ? count(sub.begin(), sub.end(), '\r') < 1 ? ' ' : '\r' : '\n';
