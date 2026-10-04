@@ -29,6 +29,7 @@ int main(int argc, char **argv)
         else if(target == "ss-uri") std::cout << proxyToSingle(nodes, 1, ext);
         else if(target == "ssr-uri") std::cout << proxyToSingle(nodes, 2, ext);
         else return 1;
+        if(ext.chain_conversion_failed) return 3;
     } catch(const std::exception &) {
         // Do not print input, credentials, or exception strings containing them.
         std::cerr << "Invalid synthetic subscription input\n";

@@ -36,46 +36,156 @@ static void warnProxyConversion(const Proxy &node, const char *target, const cha
     writeLog(0, getProxyTypeName(node.Type) + " -> " + target + ": " + reason, LOG_LEVEL_WARNING);
 }
 
-// Track source identities before target-specific renaming and filtering. A
-// dependent may not survive if its explicitly referenced source node was lost.
-// References to pre-existing base groups (not source node names) are untouched.
+// Resolve only original source identities and groups actually present in this
+// target. Rendering names and rejection decisions never escape this export.
 struct ExportChains
 {
-    std::map<std::string, size_t> source_counts;
-    std::vector<std::string> emitted, emitted_dependencies;
-    explicit ExportChains(const std::vector<Proxy> &nodes)
+    using Identity = const SourceNodeIdentity *;
+    std::map<std::string, std::vector<Identity>> sources;
+    std::set<const SourceNodeRegistry *> registries;
+    std::set<std::string> groups, empty_groups;
+    std::map<std::string, std::vector<std::string>> group_members;
+    std::vector<Identity> emitted;
+    std::vector<std::string> final_names;
+    explicit ExportChains(std::vector<Proxy> &nodes, extra_settings &ext)
     {
-        for(const auto &node : nodes) ++source_counts[node.Remark];
+        ext.chain_conversion_failed = false;
+        addRegistry(ext.source_registry);
+        for(auto &node : nodes)
+        {
+            attachSourceIdentity(node, ext.source_registry);
+            addRegistry(node.SourceRegistryRef);
+        }
+        // Fallback identities added above belong to ext's registry.
+        sources.clear();
+        for(const auto *registry : registries)
+            for(const auto &record : registry->Records) sources[record->Name].push_back(record.get());
+    }
+    void addRegistry(const SourceRegistry &registry)
+    {
+        if(registry) registries.insert(registry.get());
+    }
+    void record(const Proxy &node)
+    {
+        emitted.push_back(node.SourceIdentity.get());
+        final_names.push_back(node.Remark);
+    }
+    Identity sourceFor(const std::string &name) const
+    {
+        const auto it = sources.find(name);
+        return it != sources.end() && it->second.size() == 1 && !groups.count(name) ? it->second.front() : nullptr;
     }
     std::vector<size_t> rejected(const char *target) const
     {
-        std::map<std::string, size_t> available;
-        for(const auto &name : emitted) ++available[name];
-        std::vector<bool> rejected(emitted.size(), false);
-        bool changed;
-        do {
-            changed = false;
-            for(size_t i = 0; i < emitted.size(); ++i)
+        std::set<Identity> available(emitted.begin(), emitted.end());
+        std::set<Identity> rejected, colliding;
+        for(size_t i = 0; i < emitted.size(); ++i)
+            if(groups.count(final_names[i])) colliding.insert(emitted[i]);
+        for(const auto *start : emitted)
+        {
+            std::set<Identity> path;
+            auto current = start;
+            if((start->ChainDeclared && start->Dependency.empty()) || colliding.count(start)) { rejected.insert(start); continue; }
+            while(current && !current->Dependency.empty())
             {
-                const auto &dependency = emitted_dependencies[i];
-                const auto source = source_counts.find(dependency);
-                if(!rejected[i] && source != source_counts.end() &&
-                   (source->second > 1 || available[dependency] == 0))
+                if(colliding.count(current)) { rejected.insert(start); break; }
+                if(!path.insert(current).second) { rejected.insert(start); break; }
+                const auto &name = current->Dependency;
+                const auto found = sources.find(name);
+                if(found == sources.end() && groups.count(name))
                 {
-                    rejected[i] = true;
-                    --available[emitted[i]];
-                    changed = true;
+                    if(std::string(target) == "Surge" && name.find_first_of(",=\"\\\r\n") != std::string::npos) rejected.insert(start);
+                    break;
                 }
+                auto upstream = sourceFor(name);
+                if(!upstream || upstream->Status != SourceNodeIdentity::State::Parsed || !available.count(upstream) || colliding.count(upstream) || (upstream->ChainDeclared && upstream->Dependency.empty()))
+                { rejected.insert(start); break; }
+                current = upstream;
             }
-        } while(changed);
+        }
         std::vector<size_t> indexes;
         for(size_t i = 0; i < emitted.size(); ++i)
-            if(rejected[i]) indexes.push_back(i);
+            if(rejected.count(emitted[i])) indexes.push_back(i);
         if(!indexes.empty())
-            writeLog(0, std::string(target) + " skipped " + std::to_string(indexes.size()) + " dependent nodes: source chain target was omitted or ambiguous", LOG_LEVEL_WARNING);
+            writeLog(0, std::string(target) + " rejected dependent nodes: unresolved, omitted, ambiguous or cyclic source chain (content redacted)", LOG_LEVEL_WARNING);
         return indexes;
     }
+    void group(const std::string &name, const std::vector<std::string> &members, bool opaque = false)
+    {
+        group_members[name] = members;
+        if(members.empty() && !opaque) empty_groups.insert(name);
+        else empty_groups.erase(name);
+    }
+    bool invalidGroupChain() const
+    {
+        std::map<std::string, size_t> nodes;
+        for(size_t i = 0; i < final_names.size(); ++i) nodes[final_names[i]] = i;
+        std::set<std::string> active, complete;
+        for(size_t i = 0; i < emitted.size(); ++i)
+        {
+            if(emitted[i]->Dependency.empty()) continue;
+            std::vector<std::pair<std::string, bool>> pending{{renderedDependency(i), false}};
+            while(!pending.empty())
+            {
+                auto [name, leaving] = pending.back();
+                pending.pop_back();
+                if(leaving) { active.erase(name); complete.insert(name); continue; }
+                if(name == "DIRECT" || name == "REJECT" || name == "REJECT-TINYGIF" || name == "dns-out" || complete.count(name)) continue;
+                if(!active.insert(name).second || empty_groups.count(name)) return true;
+                pending.emplace_back(name, true);
+                const auto members = group_members.find(name);
+                const auto node = nodes.find(name);
+                if(members != group_members.end())
+                    for(auto member = members->second.rbegin(); member != members->second.rend(); ++member) pending.emplace_back(*member, false);
+                else if(node != nodes.end())
+                {
+                    const auto dependency = renderedDependency(node->second);
+                    if(!dependency.empty()) pending.emplace_back(dependency, false);
+                }
+                else if(!groups.count(name)) return true;
+            }
+        }
+        return false;
+    }
+    bool omittedChain() const
+    {
+        const std::set<Identity> available(emitted.begin(), emitted.end());
+        for(const auto &named : sources)
+            for(const auto *record : named.second)
+                if((record->ChainDeclared || !record->Dependency.empty()) && !available.count(record)) return true;
+        return false;
+    }
+    std::string renderedDependency(size_t index) const
+    {
+        const auto &name = emitted[index]->Dependency;
+        auto upstream = sourceFor(name);
+        if(!upstream) return name; // Only verified groups can reach this point.
+        const auto found = std::find(emitted.begin(), emitted.end(), upstream);
+        return found == emitted.end() ? std::string() : final_names[found - emitted.begin()];
+    }
 };
+
+static bool chainFailure(ExportChains &chains, const std::vector<size_t> &rejected, extra_settings &ext)
+{
+    if(!ext.nodelist && (!rejected.empty() || chains.omittedChain()))
+    {
+        ext.chain_conversion_failed = true;
+        writeLog(0, "Conversion refused: incomplete proxy chain; no full policy configuration emitted", LOG_LEVEL_ERROR);
+        return true;
+    }
+    return false;
+}
+
+static bool groupChainFailure(const ExportChains &chains, extra_settings &ext)
+{
+    if(!ext.nodelist && chains.invalidGroupChain())
+    {
+        ext.chain_conversion_failed = true;
+        writeLog(0, "Conversion refused: proxy chain reaches an empty, missing or cyclic group", LOG_LEVEL_ERROR);
+        return true;
+    }
+    return false;
+}
 
 static bool anyTLSTextSafe(const Proxy &node)
 {
@@ -295,8 +405,25 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
     YAML::Node proxies, original_groups;
     std::vector<Proxy> nodelist;
     string_array remarks_list;
-    ExportChains chains(nodes);
-    std::map<std::string, std::string> emitted_names;
+    ExportChains chains(nodes, ext);
+    auto rendering_nodes = nodes;
+    if(!ext.nodelist)
+    {
+        chains.groups = {"DIRECT", "REJECT"};
+        const char *key = ext.clash_new_field_name ? "proxy-groups" : "Proxy Group";
+        if(yamlnode[key].IsSequence()) for(const auto &group : yamlnode[key])
+            if(group["name"].IsScalar())
+            {
+                const auto name = group["name"].as<std::string>();
+                chains.groups.insert(name);
+                string_array members;
+                if(group["proxies"].IsSequence()) for(const auto &member : group["proxies"]) if(member.IsScalar()) members.push_back(member.as<std::string>());
+                chains.group(name, members, group["use"].IsDefined());
+            }
+        for(const auto &group : extra_proxy_group)
+            if(group.Type == ProxyGroupType::Select || group.Type == ProxyGroupType::Relay || group.Type == ProxyGroupType::LoadBalance || group.Type == ProxyGroupType::Smart || group.Type == ProxyGroupType::URLTest || group.Type == ProxyGroupType::Fallback)
+                chains.groups.insert(group.Name);
+    }
     /// proxies style
     bool proxy_block = false, proxy_compact = false, group_block = false, group_compact = false;
     switch(hash_(ext.clash_proxies_style))
@@ -324,9 +451,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             break;
     }
 
-    for(Proxy &x : nodes)
+    for(Proxy &x : rendering_nodes)
     {
-        const auto original_name = x.Remark;
         YAML::Node singleproxy;
 
         std::string type = getProxyTypeName(x.Type);
@@ -343,6 +469,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
 
         singleproxy["name"] = x.Remark;
         singleproxy["server"] = trimOf(trimOf(x.Hostname, '['), ']');
+        singleproxy["server"].SetTag("tag:yaml.org,2002:str");
         singleproxy["port"] = x.Port;
 
         switch(x.Type)
@@ -757,31 +884,25 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             singleproxy.SetStyle(YAML::EmitterStyle::Block);
         else
             singleproxy.SetStyle(YAML::EmitterStyle::Flow);
-        emitted_names.emplace(original_name, x.Remark);
         proxies.push_back(singleproxy);
-        chains.emitted.push_back(original_name);
-        chains.emitted_dependencies.push_back(x.UnderlyingProxy);
+        chains.record(x);
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
     }
-    for(auto rejected = chains.rejected("Clash"); !rejected.empty(); rejected.pop_back())
+    const auto chain_rejected = chains.rejected("Clash");
+    if(chainFailure(chains, chain_rejected, ext)) { yamlnode = YAML::Node(); return; }
+    for(size_t i = 0; i < proxies.size(); ++i)
+        if(proxies[i]["dialer-proxy"].IsDefined()) proxies[i]["dialer-proxy"] = chains.renderedDependency(i);
+    for(auto rejected = chain_rejected; !rejected.empty(); rejected.pop_back())
     {
         const auto index = rejected.back();
         proxies.remove(index);
         nodelist.erase(nodelist.begin() + index);
         remarks_list.erase(remarks_list.begin() + index);
-        emitted_names.erase(chains.emitted[index]);
     }
     if(remarks_list.size() != nodes.size())
         writeLog(0, "Clash omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
 
-
-    for(auto proxy : proxies)
-    {
-        if(!proxy["dialer-proxy"].IsDefined()) continue;
-        const auto found = emitted_names.find(proxy["dialer-proxy"].as<std::string>());
-        if(found != emitted_names.end()) proxy["dialer-proxy"] = found->second;
-    }
 
     if(proxy_compact)
         proxies.SetStyle(YAML::EmitterStyle::Flow);
@@ -849,12 +970,12 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         for(const auto& y : x.Proxies)
             groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
+        chains.group(x.Name, filtered_nodelist, !x.UsingProvider.empty());
         if(!x.UsingProvider.empty())
             singlegroup["use"] = x.UsingProvider;
         else
         {
-            if(filtered_nodelist.empty())
-                filtered_nodelist.emplace_back("DIRECT");
+            if(filtered_nodelist.empty()) filtered_nodelist.emplace_back("DIRECT");
         }
         if(!filtered_nodelist.empty())
             singlegroup["proxies"] = filtered_nodelist;
@@ -894,6 +1015,8 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         else
             yamlnode.remove("Proxy Group");
     }
+    if(groupChainFailure(chains, ext)) { yamlnode = YAML::Node(); return; }
+
 }
 
 std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf, std::vector<RulesetContent> &ruleset_content_array, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext)
@@ -911,6 +1034,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf
     }
 
     proxyToClash(nodes, yamlnode, extra_proxy_group, clashR, ext);
+    if(ext.chain_conversion_failed) return "";
 
     if(ext.nodelist)
         return YAML::Dump(yamlnode);
@@ -975,8 +1099,16 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
     std::vector<Proxy> nodelist;
     unsigned short local_port = 1080;
     string_array remarks_list;
-    ExportChains chains(nodes);
+    ExportChains chains(nodes, ext);
+    auto rendering_nodes = nodes;
     std::vector<std::string> generated_lines;
+    if(!ext.nodelist)
+    {
+        chains.groups = {"DIRECT", "REJECT", "REJECT-TINYGIF"};
+        for(const auto &group : extra_proxy_group)
+            if(group.Type == ProxyGroupType::Select || group.Type == ProxyGroupType::Smart || group.Type == ProxyGroupType::URLTest || group.Type == ProxyGroupType::Fallback || group.Type == ProxyGroupType::SSID ||
+               (group.Type == ProxyGroupType::LoadBalance && (surge_ver >= 1 || surge_ver == -3))) chains.groups.insert(group.Name);
+    }
 
     ini.store_any_line = true;
     // filter out sections that requires direct-save
@@ -998,7 +1130,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
     ini.erase_section();
     ini.set("{NONAME}", "DIRECT = direct");
 
-    for(Proxy &x : nodes)
+    for(Proxy &x : rendering_nodes)
     {
         if((x.Type == ProxyType::Shadowsocks || x.Type == ProxyType::Hysteria2) && !anyTLSTextSafe(x))
         {
@@ -1006,8 +1138,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
             continue;
         }
 
-        const auto original_name = x.Remark;
-        if(!x.UnderlyingProxy.empty() && (ext.append_proxy_type || x.UnderlyingProxy.find_first_of(",=\"\\\r\n") != std::string::npos))
+        if(!x.UnderlyingProxy.empty() && (x.UnderlyingProxy.find_first_of(",\"\\\r\n") != std::string::npos))
         {
             warnProxyConversion(x, "Surge", "skipped: chain reference needs unsupported name normalization");
             continue;
@@ -1021,7 +1152,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
 
         processRemark(x.Remark, remarks_list);
 
-        std::string &hostname = x.Hostname, &username = x.Username, &password = x.Password, &method = x.EncryptMethod, &id = x.UserId, &transproto = x.TransferProtocol, &host = x.Host, &edge = x.Edge, &path = x.Path, &protocol = x.Protocol, &protoparam = x.ProtocolParam, &obfs = x.OBFS, &obfsparam = x.OBFSParam, &plugin = x.Plugin, &pluginopts = x.PluginOption, &underlying_proxy = x.UnderlyingProxy;
+        std::string &hostname = x.Hostname, &username = x.Username, &password = x.Password, &method = x.EncryptMethod, &id = x.UserId, &transproto = x.TransferProtocol, &host = x.Host, &edge = x.Edge, &path = x.Path, &protocol = x.Protocol, &protoparam = x.ProtocolParam, &obfs = x.OBFS, &obfsparam = x.OBFSParam, &plugin = x.Plugin, &pluginopts = x.PluginOption;
         std::string port = std::to_string(x.Port);
         bool &tlssecure = x.TLSSecure;
 
@@ -1233,8 +1364,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
         if(!udp.is_undef())
             proxy += ", udp-relay=" + udp.get_str();
 
-        if (!underlying_proxy.empty())
-            proxy += ", underlying-proxy=" + underlying_proxy;
+        // Append the dependency after all target names and rejection decisions exist.
 
         if (ext.nodelist)
             output_nodelist += x.Remark + " = " + proxy + "\n";
@@ -1243,13 +1373,15 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
             ini.set("{NONAME}", x.Remark + " = " + proxy);
             nodelist.emplace_back(x);
         }
-        chains.emitted.push_back(original_name);
-        chains.emitted_dependencies.push_back(x.UnderlyingProxy);
+        chains.record(x);
         generated_lines.push_back(x.Remark + " = " + proxy);
         remarks_list.emplace_back(x.Remark);
     }
     const auto rejected = chains.rejected("Surge");
-    if(!rejected.empty())
+    if(chainFailure(chains, rejected, ext)) return "";
+    for(size_t i = 0; i < generated_lines.size(); ++i)
+        if(!chains.emitted[i]->Dependency.empty()) generated_lines[i] += ", underlying-proxy=" + chains.renderedDependency(i);
+    // Rebuild once from the resolved lines, even if no node was rejected.
     {
         for(auto it = rejected.rbegin(); it != rejected.rend(); ++it)
         {
@@ -1304,8 +1436,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
         for(const auto &y : x.Proxies)
             groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-        if(filtered_nodelist.empty())
-            filtered_nodelist.emplace_back("DIRECT");
+        chains.group(x.Name, filtered_nodelist);
+        if(filtered_nodelist.empty()) filtered_nodelist.emplace_back("DIRECT");
 
         if(filtered_nodelist.size() == 1)
         {
@@ -1353,6 +1485,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
     if(ext.enable_rule_generator)
         rulesetToSurge(ini, ruleset_content_array, surge_ver, ext.overwrite_original_rules, ext.managed_config_prefix);
 
+    if(groupChainFailure(chains, ext)) return "";
     return ini.to_string();
 }
 
@@ -2724,9 +2857,15 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
     rapidjson::Value outbounds(rapidjson::kArrayType), route(rapidjson::kArrayType);
     std::vector<Proxy> nodelist;
     string_array remarks_list;
-    ExportChains chains(nodes);
-    std::map<std::string, std::string> emitted_names;
+    ExportChains chains(nodes, ext);
 
+    if(!ext.nodelist)
+    {
+        chains.groups = {"DIRECT", "REJECT", "dns-out"};
+        if(global.singBoxAddClashModes) chains.groups.insert("GLOBAL");
+        for(const auto &group : extra_proxy_group)
+            if(group.Type == ProxyGroupType::Select || group.Type == ProxyGroupType::URLTest || group.Type == ProxyGroupType::Fallback || group.Type == ProxyGroupType::LoadBalance) chains.groups.insert(group.Name);
+    }
     if (!ext.nodelist)
     {
         auto direct = buildObject(allocator, "type", "direct", "tag", "DIRECT");
@@ -2739,7 +2878,6 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
 
     for (Proxy &x : nodes)
     {
-        const auto original_name = x.Remark;
         std::string type = getProxyTypeName(x.Type);
         if (ext.append_proxy_type)
             x.Remark = "[" + type + "] " + x.Remark;
@@ -2973,31 +3111,28 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
         if(!x.UnderlyingProxy.empty())
             proxy.AddMember("detour", rapidjson::StringRef(x.UnderlyingProxy.c_str()), allocator);
         nodelist.push_back(x);
-        chains.emitted.push_back(original_name);
-        chains.emitted_dependencies.push_back(x.UnderlyingProxy);
+        chains.record(x);
         remarks_list.emplace_back(x.Remark);
-        emitted_names.emplace(original_name, x.Remark);
         outbounds.PushBack(proxy, allocator);
     }
-    for(auto rejected = chains.rejected("sing-box"); !rejected.empty(); rejected.pop_back())
+    const auto chain_rejected = chains.rejected("sing-box");
+    if(chainFailure(chains, chain_rejected, ext)) { json.SetNull(); return; }
+    for(size_t i = 0; i < chains.emitted.size(); ++i)
+    {
+        auto &proxy = outbounds[static_cast<rapidjson::SizeType>((ext.nodelist ? 0 : 3) + i)];
+        if(proxy.HasMember("detour")) proxy["detour"].SetString(chains.renderedDependency(i).c_str(), allocator);
+    }
+    for(auto rejected = chain_rejected; !rejected.empty(); rejected.pop_back())
     {
         const auto index = rejected.back();
         const size_t prefix = ext.nodelist ? 0 : 3;
         outbounds.Erase(outbounds.Begin() + prefix + index);
         nodelist.erase(nodelist.begin() + index);
         remarks_list.erase(remarks_list.begin() + index);
-        emitted_names.erase(chains.emitted[index]);
     }
     if(remarks_list.size() != nodes.size())
         writeLog(0, "sing-box omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
 
-
-    for(auto &proxy : outbounds.GetArray())
-    {
-        if(!proxy.HasMember("detour")) continue;
-        const auto found = emitted_names.find(proxy["detour"].GetString());
-        if(found != emitted_names.end()) proxy["detour"].SetString(found->second.c_str(), allocator);
-    }
 
     if (ext.nodelist)
     {
@@ -3029,8 +3164,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
         for (const auto &y : x.Proxies)
             groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-        if (filtered_nodelist.empty())
-            filtered_nodelist.emplace_back("DIRECT");
+        chains.group(x.Name, filtered_nodelist);
+        if(filtered_nodelist.empty()) filtered_nodelist.emplace_back("DIRECT");
 
         rapidjson::Value group(rapidjson::kObjectType);
 
@@ -3065,9 +3200,11 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
         {
             global_group["outbounds"].PushBack(rapidjson::Value(x.c_str(), allocator), allocator);
         }
+        chains.group("GLOBAL", remarks_list);
         outbounds.PushBack(global_group, allocator);
     }
 
+    if(groupChainFailure(chains, ext)) { json.SetNull(); return; }
     json | AddMemberOrReplace("outbounds", outbounds, allocator);
 }
 
@@ -3091,7 +3228,10 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes, const std::string &base_co
         json.SetObject();
     }
 
-    proxyToSingBox(nodes, json, ruleset_content_array, extra_proxy_group, ext);
+    for(auto &node : nodes) attachSourceIdentity(node, ext.source_registry);
+    auto rendering_nodes = nodes;
+    proxyToSingBox(rendering_nodes, json, ruleset_content_array, extra_proxy_group, ext);
+    if(ext.chain_conversion_failed) return "";
 
     if(ext.nodelist || !ext.enable_rule_generator)
         return json | SerializeObject();

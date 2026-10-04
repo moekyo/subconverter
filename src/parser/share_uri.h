@@ -7,7 +7,9 @@
 #include <map>
 #include <string>
 
+#include "parser/config/proxy.h"
 #include "utils/network.h"
+#include "utils/ip_literal.h"
 #include "utils/tribool.h"
 
 // Strict, local-only URI parsing. Never log a URI, password or query value.
@@ -148,7 +150,7 @@ inline bool parse(const std::string &input, const std::string &scheme, Link &out
         if(p == std::string::npos) return false;
         if(p + 1 < authority.size() && authority[p + 1] != ':') return false;
         out.server = authority.substr(1, p - 1);
-        if(!isIPv6(out.server)) return false;
+        if(!isIPv6Literal(out.server)) return false;
         out.port = p + 1 == authority.size() ? default_port : authority.substr(p + 2);
     }
     else
@@ -171,6 +173,41 @@ inline bool parse(const std::string &input, const std::string &scheme, Link &out
     if(out.remark.empty()) out.remark = out.server + ":" + out.port;
     return true;
 }
+// Intake metadata only, before protocol validation. No credentials are retained.
+// A rejected named/chain-bearing entry still participates in failure accounting.
+inline std::shared_ptr<SourceNodeIdentity> reserveSource(const std::string &uri, const SourceRegistry &registry)
+{
+    std::string name, dependency;
+    const auto fragment = uri.find('#');
+    const bool named = fragment != std::string::npos && decode(uri.substr(fragment + 1), name);
+    bool chained = false;
+    const auto question = uri.find('?');
+    if(question != std::string::npos && (fragment == std::string::npos || question < fragment))
+    {
+        const auto query = uri.substr(question + 1, fragment == std::string::npos ? std::string::npos : fragment - question - 1);
+        for(size_t start = 0; start < query.size();)
+        {
+            auto end = query.find('&', start);
+            if(end == std::string::npos) end = query.size();
+            const auto pair = query.substr(start, end - start);
+            const auto equal = pair.find('=');
+            std::string key, value;
+            if(decode(pair.substr(0, equal), key) && (key == "dialer-proxy" || key == "underlying-proxy"))
+            {
+                const bool valid = equal != std::string::npos && decode(pair.substr(equal + 1), value);
+                chained = chained || !valid || !value.empty();
+                if(valid && !value.empty() && dependency.empty()) dependency = value;
+            }
+            start = end + 1;
+        }
+    }
+    if(!named && !chained) return {};
+    auto record = registry->reserve(name);
+    record->Dependency = dependency;
+    record->ChainDeclared = chained;
+    return record;
+}
+
 }
 
 #endif

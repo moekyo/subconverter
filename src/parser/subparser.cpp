@@ -290,7 +290,7 @@ void anyTLSConstruct(
     node.SNI = sni;
 }
 
-void explodeVmess(std::string vmess, Proxy &node)
+void explodeVmess(std::string vmess, Proxy &node, SourceRegistry registry)
 {
     std::string version, ps, add, port, type, id, aid, net, path, host, tls, sni;
     Document jsondata;
@@ -325,6 +325,7 @@ void explodeVmess(std::string vmess, Proxy &node)
     GetMember(jsondata, "v", version); //try to get version
 
     GetMember(jsondata, "ps", ps);
+    reserveSourceIdentity(node, registry, ps);
     GetMember(jsondata, "add", add);
     port = GetMember(jsondata, "port");
     if(port == "0")
@@ -360,8 +361,9 @@ void explodeVmess(std::string vmess, Proxy &node)
     vmessConstruct(node, V2RAY_DEFAULT_GROUP, ps, add, port, type, id, aid, net, "auto", path, host, "", tls, sni);
 }
 
-void explodeVmessConf(std::string content, std::vector<Proxy> &nodes)
+void explodeVmessConf(std::string content, std::vector<Proxy> &nodes, SourceRegistry registry)
 {
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     Document json;
     rapidjson::Value nodejson, settings;
     std::string group, ps, add, port, type, id, aid, net, path, host, edge, tls, cipher, subid, sni;
@@ -388,6 +390,7 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes)
                 nodejson = json["outbounds"][0];
                 add = GetMember(nodejson["settings"]["vnext"][0], "address");
                 port = GetMember(nodejson["settings"]["vnext"][0], "port");
+                auto source_record = registry->reserve(add + ":" + port);
                 if(port == "0")
                     return;
                 if(nodejson["settings"]["vnext"][0]["users"].Size())
@@ -436,7 +439,8 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes)
                     }
                 }
                 vmessConstruct(node, V2RAY_DEFAULT_GROUP, add + ":" + port, add, port, type, id, aid, net, cipher, path, host, edge, tls, "", udp, tfo, scv);
-                nodes.emplace_back(std::move(node));
+                attachSourceIdentity(node, registry, source_record);
+        nodes.emplace_back(std::move(node));
             }
             return;
         }
@@ -455,6 +459,7 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes)
     for(uint32_t i = 0; i < json["vmess"].Size(); i++)
     {
         Proxy node;
+        auto source_record = registry->reserve(GetMember(json["vmess"][i], "remarks"));
         if(json["vmess"][i]["address"].IsNull() || json["vmess"][i]["port"].IsNull() || json["vmess"][i]["id"].IsNull())
             continue;
 
@@ -503,6 +508,7 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes)
             continue;
         }
         node.Id = index;
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
     }
@@ -535,7 +541,8 @@ void explodeSS(std::string uri, Proxy &node)
     if(colon == std::string::npos) return;
     const auto method = credentials.substr(0, colon), password = credentials.substr(colon + 1);
     if(std::any_of(credentials.begin(), credentials.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; })) return;
-    if(std::find(ss_ciphers.begin(), ss_ciphers.end(), method) == ss_ciphers.end()) return;
+    // This legacy cross-format table is not the complete SS input capability set.
+    if(method != "none" && std::find(ss_ciphers.begin(), ss_ciphers.end(), method) == ss_ciphers.end()) return;
     std::string plugin, options;
     const auto plugin_value = link.get("plugin");
     if(!plugin_value.empty())
@@ -550,8 +557,9 @@ void explodeSS(std::string uri, Proxy &node)
     ssConstruct(node, group, link.remark, link.server, link.port, password, method, plugin, options);
 }
 
-void explodeSSD(std::string link, std::vector<Proxy> &nodes)
+void explodeSSD(std::string link, std::vector<Proxy> &nodes, SourceRegistry registry)
 {
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     Document jsondata;
     uint32_t index = nodes.size(), listType = 0, listCount = 0;
     std::string group, port, method, password, server, remarks;
@@ -607,6 +615,7 @@ void explodeSSD(std::string link, std::vector<Proxy> &nodes)
         default:
             continue;
         }
+        auto source_record = registry->reserve(GetMember(singlenode, "remarks"));
         singlenode["server"] >> server;
         GetMember(singlenode, "remarks", remarks);
         GetMember(singlenode, "port", port);
@@ -621,13 +630,15 @@ void explodeSSD(std::string link, std::vector<Proxy> &nodes)
         Proxy node;
         ssConstruct(node, group, remarks, server, port, password, method, plugin, pluginopts);
         node.Id = index;
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
     }
 }
 
-void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes)
+void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes, SourceRegistry registry)
 {
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     std::string ps, password, method, server, port, group = SS_DEFAULT_GROUP;
     std::string plugin, pluginopts;
 
@@ -642,6 +653,7 @@ void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes)
     for(uint32_t i = 0; i < json["nodes"].Size(); i++)
     {
         Proxy node;
+        auto source_record = registry->reserve(GetMember(json["nodes"][i], "remarks"));
         server = GetMember(json["nodes"][i], "server");
         if(server.empty())
             continue;
@@ -658,13 +670,15 @@ void explodeSSAndroid(std::string ss, std::vector<Proxy> &nodes)
 
         ssConstruct(node, group, ps, server, port, password, method, plugin, pluginopts);
         node.Id = index;
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
     }
 }
 
-void explodeSSConf(std::string content, std::vector<Proxy> &nodes)
+void explodeSSConf(std::string content, std::vector<Proxy> &nodes, SourceRegistry registry)
 {
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     Document json;
     std::string ps, password, method, server, port, plugin, pluginopts, group = SS_DEFAULT_GROUP;
     auto index = nodes.size();
@@ -681,6 +695,8 @@ void explodeSSConf(std::string content, std::vector<Proxy> &nodes)
     {
         Proxy node;
         ps = GetMember(json[section][i], "remarks");
+        auto source_record = registry->reserve(ps);
+        server = GetMember(json[section][i], "server");
         port = GetMember(json[section][i], "server_port");
         if(port == "0")
             continue;
@@ -695,12 +711,13 @@ void explodeSSConf(std::string content, std::vector<Proxy> &nodes)
 
         node.Id = index;
         ssConstruct(node, group, ps, server, port, password, method, plugin, pluginopts);
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
     }
 }
 
-void explodeSSR(std::string ssr, Proxy &node)
+void explodeSSR(std::string ssr, Proxy &node, SourceRegistry registry)
 {
     std::string strobfs;
     std::string remarks, group, server, port, method, password, protocol, protoparam, obfs, obfsparam;
@@ -716,6 +733,7 @@ void explodeSSR(std::string ssr, Proxy &node)
         protoparam = regReplace(urlSafeBase64Decode(getUrlArg(strobfs, "protoparam")), "\\s", "");
     }
 
+    reserveSourceIdentity(node, registry, remarks);
     if(regGetMatch(ssr, "(\\S+):(\\d+?):(\\S+?):(\\S+?):(\\S+?):(\\S+)", 7, 0, &server, &port, &protocol, &method, &obfs, &password))
         return;
     password = urlSafeBase64Decode(password);
@@ -737,8 +755,9 @@ void explodeSSR(std::string ssr, Proxy &node)
     }
 }
 
-void explodeSSRConf(std::string content, std::vector<Proxy> &nodes)
+void explodeSSRConf(std::string content, std::vector<Proxy> &nodes, SourceRegistry registry)
 {
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     Document json;
     std::string remarks, group, server, port, method, password, protocol, protoparam, obfs, obfsparam, plugin, pluginopts;
     auto index = nodes.size();
@@ -753,6 +772,7 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes)
         server = GetMember(json, "server");
         port = GetMember(json, "server_port");
         remarks = server + ":" + port;
+        auto source_record = registry->reserve(remarks);
         method = GetMember(json, "method");
         obfs = GetMember(json, "obfs");
         protocol = GetMember(json, "protocol");
@@ -768,6 +788,7 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes)
             obfsparam = GetMember(json, "obfs_param");
             ssrConstruct(node, SSR_DEFAULT_GROUP, remarks, server, port, protocol, method, obfs, password, obfsparam, protoparam);
         }
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         return;
     }
@@ -779,6 +800,7 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes)
         if(group.empty())
             group = SSR_DEFAULT_GROUP;
         remarks = GetMember(json["configs"][i], "remarks");
+        auto source_record = registry->reserve(remarks);
         server = GetMember(json["configs"][i], "server");
         port = GetMember(json["configs"][i], "server_port");
         if(port == "0")
@@ -796,6 +818,7 @@ void explodeSSRConf(std::string content, std::vector<Proxy> &nodes)
 
         ssrConstruct(node, group, remarks, server, port, protocol, method, obfs, password, obfsparam, protoparam);
         node.Id = index;
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
     }
@@ -1034,7 +1057,7 @@ void explodeQuan(const std::string &quan, Proxy &node)
     }
 }
 
-void explodeNetch(std::string netch, Proxy &node)
+void explodeNetch(std::string netch, Proxy &node, SourceRegistry registry = {})
 {
     Document json;
     std::string type, group, remark, address, port, username, password, method, plugin, pluginopts;
@@ -1048,6 +1071,7 @@ void explodeNetch(std::string netch, Proxy &node)
     type = GetMember(json, "Type");
     group = GetMember(json, "Group");
     remark = GetMember(json, "Remark");
+    reserveSourceIdentity(node, registry, remark);
     address = GetMember(json, "Hostname");
     udp = GetMember(json, "EnableUDP");
     tfo = GetMember(json, "EnableTFO");
@@ -1205,7 +1229,7 @@ static bool parseTuicOptions(const YAML::Node &input, Proxy &node)
     return true;
 }
 
-void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
+void explodeClash(Node yamlnode, std::vector<Proxy> &nodes, const SourceRegistry &registry)
 {
     uint32_t index = nodes.size();
     const std::string section = yamlnode["proxies"].IsDefined() ? "proxies" : "Proxy";
@@ -1226,8 +1250,13 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
         Node singleproxy;
         Proxy node;
         singleproxy = yamlnode[section][i];
-        singleproxy["type"] >>= proxytype;
         singleproxy["name"] >>= ps;
+        auto source_record = registry->reserve(ps);
+        for(const char *key : {"dialer-proxy", "underlying-proxy"})
+            if(singleproxy[key].IsDefined() && (!singleproxy[key].IsScalar() || !singleproxy[key].as<std::string>().empty())) source_record->ChainDeclared = true;
+        if(singleproxy["dialer-proxy"].IsScalar()) source_record->Dependency = singleproxy["dialer-proxy"].as<std::string>();
+        else if(singleproxy["underlying-proxy"].IsScalar()) source_record->Dependency = singleproxy["underlying-proxy"].as<std::string>();
+        singleproxy["type"] >>= proxytype;
         singleproxy["server"] >>= server;
         singleproxy["port"] >>= port;
         singleproxy["dialer-proxy"] >>= underlying_proxy;
@@ -1610,6 +1639,7 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes)
         }
 
         node.Id = index;
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
         }
@@ -1945,7 +1975,7 @@ void parsePeers(Proxy &node, const std::string &data)
     }
 }
 
-bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
+bool explodeSurge(std::string surge, std::vector<Proxy> &nodes, const SourceRegistry &registry)
 {
     std::multimap<std::string, std::string> proxies;
     uint32_t i, index = nodes.size();
@@ -1992,6 +2022,14 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
         configs = split(regReplace(x.second, proxystr, "$2"), ",");
         */
         regGetMatch(x.second, proxystr, 3, 0, &remarks, &config);
+        configs = split(config, ",");
+        if(!configs.empty() && (trim(configs[0]) == "direct" || trim(configs[0]) == "reject" || trim(configs[0]) == "reject-tinygif")) continue;
+        // QX uses a protocol keyword on the left and tag= for the source name.
+        std::string source_name = remarks;
+        if(remarks == "shadowsocks" || remarks == "vmess" || remarks == "trojan" || remarks == "anytls" || remarks == "http")
+            for(const auto &part : split(config, ","))
+                if(startsWith(trim(part), "tag=")) source_name = trim(part).substr(4);
+        auto source_record = registry->reserve(source_name);
         configs = split(config, ",");
         if(configs.size() < 3)
             continue;
@@ -2748,14 +2786,16 @@ bool explodeSurge(std::string surge, std::vector<Proxy> &nodes)
         }
 
         node.Id = index;
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
     }
     return index;
 }
 
-void explodeSSTap(std::string sstap, std::vector<Proxy> &nodes)
+void explodeSSTap(std::string sstap, std::vector<Proxy> &nodes, SourceRegistry registry)
 {
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     std::string configType, group, remarks, server, port;
     std::string cipher;
     std::string user, pass;
@@ -2769,6 +2809,7 @@ void explodeSSTap(std::string sstap, std::vector<Proxy> &nodes)
     for(uint32_t i = 0; i < json["configs"].Size(); i++)
     {
         Proxy node;
+        auto source_record = registry->reserve(GetMember(json["configs"][i], "remarks"));
         json["configs"][i]["group"] >> group;
         json["configs"][i]["remarks"] >> remarks;
         json["configs"][i]["server"] >> server;
@@ -2807,13 +2848,15 @@ void explodeSSTap(std::string sstap, std::vector<Proxy> &nodes)
         }
 
         node.Id = index;
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
     }
 }
 
-void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes)
+void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes, SourceRegistry registry)
 {
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     Document json;
     uint32_t index = nodes.size();
 
@@ -2827,80 +2870,93 @@ void explodeNetchConf(std::string netch, std::vector<Proxy> &nodes)
     for(uint32_t i = 0; i < json["Server"].Size(); i++)
     {
         Proxy node;
+        auto source_record = registry->reserve(GetMember(json["Server"][i], "Remark"));
         explodeNetch("Netch://" + base64Encode(json["Server"][i] | SerializeObject()), node);
 
+        if(node.Type == ProxyType::Unknown) continue;
         node.Id = index;
+        attachSourceIdentity(node, registry, source_record);
         nodes.emplace_back(std::move(node));
         index++;
     }
 }
 
-int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes)
+int explodeConfContent(const std::string &input, std::vector<Proxy> &nodes, SourceRegistry registry)
 {
+    const std::string without_bom = startsWith(input, "\xEF\xBB\xBF") ? input.substr(3) : std::string();
+    const std::string &content = startsWith(input, "\xEF\xBB\xBF") ? without_bom : input;
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
+    const auto initial_size = nodes.size();
+    ConfType filetype = ConfType::Unknow;
     const auto first = content.find_first_not_of(" \t\r\n");
-    if(first != std::string::npos && content[first] == '{')
+    if(first != std::string::npos && (content[first] == '{' || content[first] == '['))
     {
         Document document;
         document.Parse(content.c_str());
-        if(!document.HasParseError() && document.IsObject() &&
-           ((document.HasMember("proxies") && document["proxies"].IsArray()) ||
-            (document.HasMember("Proxy") && document["Proxy"].IsArray())))
+        if(!document.HasParseError() && document.IsArray())
         {
-            explodeClash(YAML::Load(content), nodes);
-            return !nodes.empty();
+            // Existing SS Android exports are arrays, not object containers.
+            const bool android = std::any_of(document.Begin(), document.End(), [](const auto &item) { return item.IsObject() && item.HasMember("proxy_apps"); });
+            if(android) filetype = ConfType::SSConf;
+            else return 0;
+        }
+        else if(!document.HasParseError() && document.IsObject())
+        {
+            if((document.HasMember("proxies") && document["proxies"].IsArray()) ||
+               (document.HasMember("Proxy") && document["Proxy"].IsArray()))
+            {
+                explodeClash(YAML::Load(content), nodes, registry);
+                return !nodes.empty();
+            }
+            // Classify real JSON containers, never keywords in arbitrary URI data.
+            if(document.HasMember("version")) filetype = ConfType::SS;
+            else if(document.HasMember("serverSubscribes")) filetype = ConfType::SSR;
+            else if(document.HasMember("uiItem") || document.HasMember("outbounds")) filetype = ConfType::V2Ray;
+            else if(document.HasMember("idInUse")) filetype = ConfType::SSTap;
+            else if(document.HasMember("local_address") && document.HasMember("local_port")) filetype = ConfType::SSR;
+            else if(document.HasMember("ModeFileNameType")) filetype = ConfType::Netch;
+            else return 0;
         }
     }
-    ConfType filetype = ConfType::Unknow;
-
-    if(strFind(content, "\"version\""))
-        filetype = ConfType::SS;
-    else if(strFind(content, "\"serverSubscribes\""))
-        filetype = ConfType::SSR;
-    else if(strFind(content, "\"uiItem\"") || strFind(content, "vnext"))
-        filetype = ConfType::V2Ray;
-    else if(strFind(content, "\"proxy_apps\""))
-        filetype = ConfType::SSConf;
-    else if(strFind(content, "\"idInUse\""))
-        filetype = ConfType::SSTap;
-    else if(strFind(content, "\"local_address\"") && strFind(content, "\"local_port\""))
-        filetype = ConfType::SSR; //use ssr config parser
-    else if(strFind(content, "\"ModeFileNameType\""))
-        filetype = ConfType::Netch;
 
     switch(filetype)
     {
     case ConfType::SS:
-        explodeSSConf(content, nodes);
+        explodeSSConf(content, nodes, registry);
         break;
     case ConfType::SSR:
-        explodeSSRConf(content, nodes);
+        explodeSSRConf(content, nodes, registry);
         break;
     case ConfType::V2Ray:
-        explodeVmessConf(content, nodes);
+        explodeVmessConf(content, nodes, registry);
         break;
     case ConfType::SSConf:
-        explodeSSAndroid(content, nodes);
+        explodeSSAndroid(content, nodes, registry);
         break;
     case ConfType::SSTap:
-        explodeSSTap(content, nodes);
+        explodeSSTap(content, nodes, registry);
         break;
     case ConfType::Netch:
-        explodeNetchConf(content, nodes);
+        explodeNetchConf(content, nodes, registry);
         break;
     default:
         //try to parse as a local subscription
-        explodeSub(content, nodes);
+        explodeSub(content, nodes, registry);
     }
 
+    for(size_t i = initial_size; i < nodes.size(); ++i) attachSourceIdentity(nodes[i], registry);
     return !nodes.empty();
 }
 
-void explode(const std::string &link, Proxy &node)
+void explode(const std::string &link, Proxy &node, SourceRegistry registry)
 {
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
+    node.SourceRegistryRef = registry;
+    node.SourceIdentity = share_uri::reserveSource(link, registry);
     if(startsWith(link, "ssr://"))
-        explodeSSR(link, node);
+        explodeSSR(link, node, registry);
     else if(startsWith(link, "vmess://") || startsWith(link, "vmess1://"))
-        explodeVmess(link, node);
+        explodeVmess(link, node, registry);
     else if(startsWith(link, "ss://"))
         explodeSS(link, node);
     else if(startsWith(link, "socks://") || startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
@@ -2908,7 +2964,7 @@ void explode(const std::string &link, Proxy &node)
     else if(startsWith(link, "https://t.me/http") || startsWith(link, "tg://http")) //telegram style http link
         explodeHTTP(link, node);
     else if(startsWith(link, "Netch://"))
-        explodeNetch(link, node);
+        explodeNetch(link, node, registry);
     else if(startsWith(link, "tuic://"))
         explodeTuic(link, node);
     else if(startsWith(link, "vless://"))
@@ -2921,31 +2977,47 @@ void explode(const std::string &link, Proxy &node)
         explodeAnyTLS(link, node);
     else if(isLink(link))
         explodeHTTPSub(link, node);
+    if(node.Type != ProxyType::Unknown) attachSourceIdentity(node, registry);
 }
 
-void explodeSub(std::string sub, std::vector<Proxy> &nodes)
+static bool isRawUriSubscription(const std::string &content)
 {
+    std::stringstream lines(content);
+    std::string line;
+    while(std::getline(lines, line))
+    {
+        line = trim(line);
+        if(line.empty() || line.front() == '#') continue;
+        return regFind(line, "^[A-Za-z][A-Za-z0-9+.-]*://");
+    }
+    return false;
+}
+
+void explodeSub(std::string sub, std::vector<Proxy> &nodes, SourceRegistry registry)
+{
+    if(!registry) registry = std::make_shared<SourceNodeRegistry>();
     std::stringstream strstream;
     std::string strLink;
     bool processed = false;
+    const bool raw_uri = isRawUriSubscription(sub);
 
     //try to parse as SSD configuration
     if(startsWith(sub, "ssd://"))
     {
-        explodeSSD(sub, nodes);
+        explodeSSD(sub, nodes, registry);
         processed = true;
     }
 
     //try to parse as clash configuration
     try
     {
-        if(!processed && regFind(sub, "\"?(Proxy|proxies)\"?:"))
+        if(!processed && !raw_uri && regFind(sub, "\"?(Proxy|proxies)\"?:"))
         {
             regGetMatch(sub, R"(^(?:Proxy|proxies):$\s(?:(?:^ +?.*$| *?-.*$|)\s?)+)", 1, &sub);
             Node yamlnode = Load(sub);
             if(yamlnode.size() && (yamlnode["Proxy"].IsDefined() || yamlnode["proxies"].IsDefined()))
             {
-                explodeClash(yamlnode, nodes);
+                explodeClash(yamlnode, nodes, registry);
                 processed = true;
             }
         }
@@ -2958,7 +3030,7 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes)
     }
 
     //try to parse as surge configuration
-    if(!processed && explodeSurge(sub, nodes))
+    if(!processed && !raw_uri && explodeSurge(sub, nodes, registry))
     {
         processed = true;
     }
@@ -2968,11 +3040,11 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes)
     {
         // A mixed plaintext URI subscription must not be Base64-decoded again.
         // Unknown schemes remain visible to the unsupported-entry diagnostics.
-        if(!regFind(sub, "[A-Za-z][A-Za-z0-9+.-]*://"))
+        if(!raw_uri)
             sub = urlSafeBase64Decode(sub);
-        if(regFind(sub, "(vmess|shadowsocks|http|trojan)\\s*?="))
+        if(!isRawUriSubscription(sub) && regFind(sub, "(vmess|shadowsocks|http|trojan)\\s*?="))
         {
-            if(explodeSurge(sub, nodes))
+            if(explodeSurge(sub, nodes, registry))
                 return;
         }
         strstream << sub;
@@ -2982,7 +3054,9 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes)
             Proxy node;
             if(strLink.rfind('\r') != std::string::npos)
                 strLink.erase(strLink.size() - 1);
-            explode(strLink, node);
+            strLink = trim(strLink);
+            if(strLink.empty() || strLink.front() == '#') continue;
+            explode(strLink, node, registry);
             if(strLink.empty()) continue;
             if(node.Type == ProxyType::Unknown)
             {

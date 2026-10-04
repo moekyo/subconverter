@@ -16,6 +16,7 @@
 
 struct parse_settings
 {
+    SourceRegistry source_registry = std::make_shared<SourceNodeRegistry>();
     std::string *proxy = nullptr;
     string_array *exclude_remarks = nullptr;
     string_array *include_remarks = nullptr;

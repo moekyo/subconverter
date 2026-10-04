@@ -30,6 +30,7 @@ if(BUILD_FETCH_TESTS)
         fetch-contract-driver.cpp
         ../src/handler/webget.cpp
         ../src/utils/file.cpp
+        ../src/utils/system.cpp
         ../src/utils/string.cpp
         ../src/utils/urlencode.cpp
         ../src/utils/base64/base64.cpp
@@ -38,3 +39,12 @@ if(BUILD_FETCH_TESTS)
     target_include_directories(fetch-contract-driver PRIVATE ../src ${RAPIDJSON_INCLUDE_DIRS} ${YAML_CPP_INCLUDE_DIRS})
     target_link_libraries(fetch-contract-driver PRIVATE CURL::libcurl)
 endif()
+
+if(WIN32)
+    target_link_libraries(subscription-proxy-route PRIVATE ws2_32)
+endif()
+
+add_executable(chain-convert chain-convert.cpp)
+target_compile_definitions(chain-convert PRIVATE NO_JS_RUNTIME NO_WEBGET)
+target_include_directories(chain-convert PRIVATE ${RAPIDJSON_INCLUDE_DIRS} ${YAML_CPP_INCLUDE_DIRS})
+target_link_libraries(chain-convert PRIVATE subconverter)

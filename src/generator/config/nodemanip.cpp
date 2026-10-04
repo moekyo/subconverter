@@ -9,6 +9,7 @@
 #include "parser/config/proxy.h"
 #include "parser/infoparser.h"
 #include "parser/subparser.h"
+#include "parser/share_uri.h"
 #include "script/script_quickjs.h"
 #include "utils/file_extra.h"
 #include "utils/logger.h"
@@ -23,6 +24,7 @@ extern Settings global;
 
 bool applyMatcher(const std::string &rule, std::string &real_rule, const Proxy &node);
 
+#ifndef NO_WEBGET
 int explodeConf(const std::string &filepath, std::vector<Proxy> &nodes)
 {
     return explodeConfContent(fileGet(filepath), nodes);
@@ -172,7 +174,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         if(!strSub.empty())
         {
             writeLog(LOG_TYPE_INFO, "Parsing subscription data...");
-            if(explodeConfContent(strSub, nodes) == 0)
+            if(explodeConfContent(strSub, nodes, parse_set.source_registry) == 0)
             {
                 writeLog(LOG_TYPE_ERROR, "Invalid subscription: '" + link + "'!");
                 return -1;
@@ -206,7 +208,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         if(!authorized)
             return -1;
         writeLog(LOG_TYPE_INFO, "Parsing configuration file data...");
-        if(explodeConf(link, nodes) == 0)
+        if(explodeConfContent(fileGet(link), nodes, parse_set.source_registry) == 0)
         {
             writeLog(LOG_TYPE_ERROR, "Invalid configuration file!");
             return -1;
@@ -229,7 +231,8 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         copyNodes(nodes, allNodes);
         break;
     default:
-        explode(link, node);
+    {
+        explode(link, node, parse_set.source_registry);
         if(node.Type == ProxyType::Unknown)
         {
             writeLog(LOG_TYPE_ERROR, "No valid link found.");
@@ -240,8 +243,11 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
             node.Group = custom_group;
         allNodes.emplace_back(std::move(node));
     }
+    }
     return 0;
 }
+
+#endif // NO_WEBGET
 
 bool chkIgnore(const Proxy &node, string_array &exclude_remarks, string_array &include_remarks)
 {
@@ -290,7 +296,8 @@ void filterNodes(std::vector<Proxy> &nodes, string_array &exclude_remarks, strin
         if(chkIgnore(*iter, exclude_remarks, include_remarks))
         {
             writeLog(LOG_TYPE_INFO, "Node  " + iter->Group + " - " + iter->Remark + "  has been ignored and will not be added.");
-            nodes.erase(iter);
+            markSourceFiltered(*iter);
+            iter = nodes.erase(iter);
         }
         else
         {
@@ -391,6 +398,7 @@ void nodeRename(Proxy &node, const RegexMatchConfigs &rename_array, extra_settin
 
     for(const RegexMatchConfig &x : rename_array)
     {
+        #ifndef NO_JS_RUNTIME
         if(!x.Script.empty() && ext.authorized)
         {
             script_safe_runner(ext.js_runtime, ext.js_context, [&](qjs::Context &ctx)
@@ -413,6 +421,7 @@ void nodeRename(Proxy &node, const RegexMatchConfigs &rename_array, extra_settin
             }, global.scriptCleanContext);
             continue;
         }
+        #endif // NO_JS_RUNTIME
         if(applyMatcher(x.Match, real_rule, node) && real_rule.size())
             remark = regReplace(remark, real_rule, x.Replace);
     }
@@ -427,7 +436,7 @@ std::string removeEmoji(const std::string &orig_remark)
     std::string remark = orig_remark;
     while(true)
     {
-        if(remark[0] == emoji_id[0] && remark[1] == emoji_id[1])
+        if(remark.size() >= 4 && remark[0] == emoji_id[0] && remark[1] == emoji_id[1])
             remark.erase(0, 4);
         else
             break;
@@ -443,6 +452,7 @@ std::string addEmoji(const Proxy &node, const RegexMatchConfigs &emoji_array, ex
 
     for(const RegexMatchConfig &x : emoji_array)
     {
+        #ifndef NO_JS_RUNTIME
         if(!x.Script.empty() && ext.authorized)
         {
             std::string result;
@@ -468,6 +478,7 @@ std::string addEmoji(const Proxy &node, const RegexMatchConfigs &emoji_array, ex
                 return result;
             continue;
         }
+        #endif // NO_JS_RUNTIME
         if(x.Replace.empty())
             continue;
         if(applyMatcher(x.Match, real_rule, node) && real_rule.size() && regFind(node.Remark, real_rule))
@@ -478,6 +489,7 @@ std::string addEmoji(const Proxy &node, const RegexMatchConfigs &emoji_array, ex
 
 void preprocessNodes(std::vector<Proxy> &nodes, extra_settings &ext)
 {
+    for(auto &node : nodes) attachSourceIdentity(node, ext.source_registry);
     std::for_each(nodes.begin(), nodes.end(), [&ext](Proxy &x)
     {
         if(ext.remove_emoji)
@@ -492,6 +504,7 @@ void preprocessNodes(std::vector<Proxy> &nodes, extra_settings &ext)
     if(ext.sort_flag)
     {
         bool failed = true;
+        #ifndef NO_JS_RUNTIME
         if(ext.sort_script.size() && ext.authorized)
         {
             std::string script = ext.sort_script;
@@ -520,6 +533,7 @@ void preprocessNodes(std::vector<Proxy> &nodes, extra_settings &ext)
                 }
             }, global.scriptCleanContext);
         }
+        #endif // NO_JS_RUNTIME
         if(failed) std::stable_sort(nodes.begin(), nodes.end(), [](const Proxy &a, const Proxy &b)
         {
             return a.Remark < b.Remark;

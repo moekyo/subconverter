@@ -5,6 +5,7 @@
 #include <vector>
 #include <optional>
 #include <map>
+#include <memory>
 
 #include "utils/tribool.h"
 
@@ -76,6 +77,28 @@ struct TuicOptions
     std::map<String, bool> Booleans;
 };
 
+// Request-local source identity survives parser rejection, filtering and renaming.
+// Exporters may read this state but never store target-specific decisions here.
+struct SourceNodeIdentity
+{
+    enum class State { Rejected, Parsed, Filtered };
+    std::string Name, Dependency;
+    bool ChainDeclared = false;
+    State Status = State::Rejected;
+};
+struct SourceNodeRegistry
+{
+    std::vector<std::shared_ptr<SourceNodeIdentity>> Records;
+    std::shared_ptr<SourceNodeIdentity> reserve(const std::string &name)
+    {
+        auto record = std::make_shared<SourceNodeIdentity>();
+        record->Name = name;
+        Records.push_back(record);
+        return record;
+    }
+};
+using SourceRegistry = std::shared_ptr<SourceNodeRegistry>;
+
 struct Proxy
 {
     ProxyType Type = ProxyType::Unknown;
@@ -83,6 +106,8 @@ struct Proxy
     uint32_t GroupId = 0;
     String Group;
     String Remark;
+    SourceRegistry SourceRegistryRef;
+    std::shared_ptr<SourceNodeIdentity> SourceIdentity;
     String Hostname;
     uint16_t Port = 0;
 
@@ -160,6 +185,33 @@ struct Proxy
 
     uint32_t CWND = 0;
 };
+
+inline void attachSourceIdentity(Proxy &node, const SourceRegistry &registry,
+                                 std::shared_ptr<SourceNodeIdentity> record = {})
+{
+    if(node.SourceIdentity)
+    {
+        if(node.SourceIdentity->Status != SourceNodeIdentity::State::Rejected) return;
+        record = node.SourceIdentity;
+    }
+    if(!record) record = registry->reserve(node.Remark);
+    record->Name = node.Remark; // Includes a parser-derived default or QX tag.
+    record->Status = SourceNodeIdentity::State::Parsed;
+    record->Dependency = node.UnderlyingProxy;
+    record->ChainDeclared = record->ChainDeclared || !node.UnderlyingProxy.empty();
+    node.SourceRegistryRef = registry;
+    node.SourceIdentity = std::move(record);
+}
+inline void reserveSourceIdentity(Proxy &node, const SourceRegistry &registry, const std::string &name)
+{
+    if(!registry || node.SourceIdentity) return;
+    node.SourceRegistryRef = registry;
+    node.SourceIdentity = registry->reserve(name);
+}
+inline void markSourceFiltered(const Proxy &node)
+{
+    if(node.SourceIdentity) node.SourceIdentity->Status = SourceNodeIdentity::State::Filtered;
+}
 
 #define SS_DEFAULT_GROUP "SSProvider"
 #define SSR_DEFAULT_GROUP "SSRProvider"

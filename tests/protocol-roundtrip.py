@@ -52,7 +52,7 @@ class AnyTLSContracts(unittest.TestCase):
                         "idle-session-check-interval": 45, "idle-session-timeout": 90,
                         "min-idle-session": 0, "dialer-proxy": "Upstream"})
         plain = proxy("anytls", "anytls-default", password="other")
-        doc = {"proxies": [rich, plain]}
+        doc = {"proxies": [rich, plain, proxy("ss", "Upstream", password="p", cipher="aes-128-gcm")]}
         for style in ("block", "flow"):
             for mode in ("full", "list"):
                 out, _ = convert(doc, style=style, mode=mode)
@@ -111,7 +111,7 @@ class AnyTLSContracts(unittest.TestCase):
 
     def test_singbox_clienthello_and_detour(self):
         p = proxy("anytls", password="synthetic", **{"client-fingerprint": "chrome", "dialer-proxy": "Upstream"})
-        out, _ = convert({"proxies": [p]}, "singbox")
+        out, _ = convert({"proxies": [p, proxy("ss", "Upstream", password="p", cipher="aes-128-gcm")]}, "singbox")
         self.assertEqual(out["outbounds"][0]["tls"]["utls"], {"enabled": True, "fingerprint": "chrome"})
         self.assertEqual(out["outbounds"][0]["detour"], "Upstream")
 
@@ -298,7 +298,10 @@ class MixedSafetyContracts(unittest.TestCase):
         # Dependents before upstream exercise fixed-point pruning, not input order.
         fixture = {"proxies": [last, middle, upstream, independent]}
         for target in ("surge", "singbox"):
-            for mode in ("full", "list"):
+            failed = convert(fixture, target, mode="full", ok=False)
+            self.assertEqual(failed.returncode, 3)
+            self.assertFalse(failed.stdout.strip())
+            for mode in ("list",):
                 result, warning = convert(fixture, target, mode=mode)
                 text = json.dumps(result) if isinstance(result, dict) else result
                 for omitted in ("Last", "Middle", "TUIC-upstream"):
@@ -307,9 +310,9 @@ class MixedSafetyContracts(unittest.TestCase):
                 self.assertIn("dependent nodes", warning)
         out, _ = convert(fixture)
         self.assertEqual(len(out["proxies"]), 4)
-        # A base group is not a filtered source node.
+        # Unresolved names cannot be assumed to be external groups in a node list.
         out, _ = convert({"proxies": [proxy("ss", password="p", cipher="aes-128-gcm", **{"dialer-proxy": "Base group"})]})
-        self.assertEqual(out["proxies"][0]["dialer-proxy"], "Base group")
+        self.assertFalse(out.get("proxies"))
 
     def test_duplicate_names_do_not_share_dependency_identity(self):
         one = proxy("ss", "Duplicate", password="p", cipher="aes-128-gcm")

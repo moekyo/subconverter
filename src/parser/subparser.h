@@ -83,8 +83,8 @@ void hysteria2Construct(
     const std::string &underlying_proxy = ""
 );
 
-void explodeVmess(std::string vmess, Proxy &node);
-void explodeSSR(std::string ssr, Proxy &node);
+void explodeVmess(std::string vmess, Proxy &node, SourceRegistry registry = {});
+void explodeSSR(std::string ssr, Proxy &node, SourceRegistry registry = {});
 void explodeSS(std::string ss, Proxy &node);
 void explodeTrojan(std::string trojan, Proxy &node);
 void explodeQuan(const std::string &quan, Proxy &node);
@@ -95,10 +95,10 @@ void explodeHysteria2(std::string hysteria2, Proxy &node);
 void explodeAnyTLS(std::string anytls, Proxy &node);
 
 /// Parse a link
-void explode(const std::string &link, Proxy &node);
-void explodeSSD(std::string link, std::vector<Proxy> &nodes);
-void explodeSub(std::string sub, std::vector<Proxy> &nodes);
+void explode(const std::string &link, Proxy &node, SourceRegistry registry = {});
+void explodeSSD(std::string link, std::vector<Proxy> &nodes, SourceRegistry registry = {});
+void explodeSub(std::string sub, std::vector<Proxy> &nodes, SourceRegistry registry = {});
 int explodeConf(const std::string &filepath, std::vector<Proxy> &nodes);
-int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes);
+int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes, SourceRegistry registry = {});
 
 #endif // SUBPARSER_H_INCLUDED

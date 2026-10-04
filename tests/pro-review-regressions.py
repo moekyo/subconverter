@@ -129,5 +129,75 @@ class ExistingDefectGate(unittest.TestCase):
         self.assertEqual(out["proxies"], [p])
 
 
+class PRReviewBoundaryGate(unittest.TestCase):
+    def test_ss_none_equivalent_input_formats(self):
+        node = proxy("ss", "none", cipher="none", password="p")
+        uri = "ss://bm9uZTpw@proxy.example:443#none"
+        for source in (uri, base64.b64encode(uri.encode()).decode(),
+                       {"proxies": [node]}, json.dumps({"proxies": [node]})):
+            with self.subTest(source_format=type(source).__name__):
+                self.assertEqual(convert(source)[0]["proxies"], [node])
+        invalid = "ss://" + base64.b64encode(b"invented-cipher:p").decode() + "@proxy.example:443#bad"
+        self.assertNotEqual(convert(invalid, ok=False).returncode, 0)
+
+    def test_raw_and_base64_keep_keyword_data(self):
+        normal = "ss://YWVzLTEyOC1nY206cA@proxy.example:443#good"
+        for second in ("ss://YWVzLTEyOC1nY206cDI@proxy.example:443#test-vnext",
+                       "ss://YWVzLTEyOC1nY206cDI@vnext.example:443#host",
+                       "anytls://vnext@last.example:443#last",
+                       "ss://YWVzLTEyOC1nY206cDI@proxy.example:443#proxies:fragment",
+                       "ss://YWVzLTEyOC1nY206cDI@proxy.example:443#http=fragment"):
+            raw = normal + "\n" + second
+            direct, _ = convert(raw)
+            encoded, _ = convert(raw, encoded=True)
+            self.assertEqual(direct, encoded)
+            self.assertEqual(len(direct["proxies"]), 2)
+
+    def test_keyword_data_in_yaml_and_json(self):
+        node = proxy("ss", "vnext-version", cipher="aes-128-gcm", password="vnext")
+        node["server"] = "vnext.example"
+        doc = {"proxies": [node]}
+        self.assertEqual(convert(doc)[0], convert(json.dumps(doc))[0])
+        self.assertEqual(convert(doc)[0]["proxies"], [node])
+
+    def test_legacy_android_array_and_flow_yaml(self):
+        android = [{"server": "proxy.example", "server_port": 443, "password": "p", "method": "aes-128-gcm", "remarks": "Android", "proxy_apps": {"enabled": False}}]
+        out, _ = convert(json.dumps(android))
+        self.assertEqual(out["proxies"], [proxy("ss", "Android", cipher="aes-128-gcm", password="p")])
+        flow = "{proxies: [{name: Flow, type: ss, server: proxy.example, port: 443, cipher: aes-128-gcm, password: p}]}"
+        self.assertEqual(convert(flow)[0]["proxies"], [proxy("ss", "Flow", cipher="aes-128-gcm", password="p")])
+
+    def test_utf8_bom_keeps_raw_and_legacy_json_dispatch(self):
+        uri = "ss://YWVzLTEyOC1nY206cA@proxy.example:443#vnext"
+        self.assertEqual(convert("\ufeff" + uri)[0], convert(uri)[0])
+        legacy = json.dumps({"version": 1, "servers": [{"remarks": "Legacy", "server": "proxy.example", "server_port": 443, "method": "aes-128-gcm", "password": "p"}]})
+        self.assertEqual(convert("\ufeff" + legacy)[0], convert(legacy)[0])
+
+    def test_real_legacy_v2ray_json_still_dispatches(self):
+        source = {"outbounds": [{"protocol": "vmess", "settings": {"vnext": [
+            {"address": "proxy.example", "port": 443, "users": [{
+                "id": "00000000-0000-4000-8000-000000000001", "alterId": 0, "security": "auto"}]}]},
+            "streamSettings": {"network": "tcp", "security": "none", "tcpSettings": {}}}]}
+        out, _ = convert(json.dumps(source))
+        self.assertEqual(len(out["proxies"]), 1)
+        self.assertEqual(out["proxies"][0]["type"], "vmess")
+        self.assertEqual(out["proxies"][0]["server"], "proxy.example")
+
+    def test_shared_ipv6_parser_valid_and_invalid_literals(self):
+        authorities = {"ss": "YWVzLTEyOC1nY206cA", "anytls": "p", "hy2": "p", "tuic": "token",
+                       "vless": "00000000-0000-4000-8000-000000000001"}
+        valid = ("2001:db8::1", "1:2:3:4:5:6:7:8", "::ffff:192.0.2.1", "0:0:0:0:0:ffff:192.0.2.1", "::1")
+        invalid = ("1:2:3:4:5:6:7:8:9::", "1:2:3", "1::2::3", "::ffff:999.0.2.1", "fe80::1%25eth0", "fe80::1%eth0")
+        for scheme, auth in authorities.items():
+            for address in valid + invalid:
+                with self.subTest(scheme=scheme, address=address):
+                    uri = scheme + "://" + auth + "@[" + address + "]:443#ip"
+                    for encoded in (False, True):
+                        if address in valid:
+                            self.assertEqual(convert(uri, encoded=encoded)[0]["proxies"][0]["server"], address)
+                        else:
+                            self.assertNotEqual(convert(uri, encoded=encoded, ok=False).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

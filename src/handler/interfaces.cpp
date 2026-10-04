@@ -642,6 +642,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     int groupID = 0;
 
     parse_settings parse_set;
+    parse_set.source_registry = ext.source_registry;
     parse_set.proxy = &proxy;
     parse_set.exclude_remarks = &lExcludeRemarks;
     parse_set.include_remarks = &lIncludeRemarks;
@@ -758,7 +759,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             {
                 ctx.eval(filterScript);
                 auto filter = (std::function<bool(const Proxy&)>) ctx.eval("filter");
-                nodes.erase(std::remove_if(nodes.begin(), nodes.end(), filter), nodes.end());
+                nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [&](const Proxy &node) {
+                    const bool drop = filter(node);
+                    if(drop) markSourceFiltered(node);
+                    return drop;
+                }), nodes.end());
             }
             catch(qjs::exception)
             {
@@ -819,7 +824,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             output_content = proxyToClash(nodes, base_content, lRulesetContent, lCustomProxyGroups, argTarget == "clashr", ext);
         }
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist(argTarget, argUploadPath, output_content, false);
         break;
     case "surge"_hash:
@@ -830,7 +835,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         {
             output_content = proxyToSurge(nodes, base_content, dummy_ruleset, dummy_group, intSurgeVer, ext);
 
-            if(argUpload)
+            if(argUpload && !ext.chain_conversion_failed)
                 uploadGist("surge" + argSurgeVer + "list", argUploadPath, output_content, true);
         }
         else
@@ -842,7 +847,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             }
             output_content = proxyToSurge(nodes, base_content, lRulesetContent, lCustomProxyGroups, intSurgeVer, ext);
 
-            if(argUpload)
+            if(argUpload && !ext.chain_conversion_failed)
                 uploadGist("surge" + argSurgeVer, argUploadPath, output_content, true);
 
             if(global.writeManagedConfig && !global.managedConfigPrefix.empty())
@@ -859,7 +864,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             return base_content;
         }
         output_content = proxyToSurge(nodes, base_content, lRulesetContent, lCustomProxyGroups, -3, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("surfboard", argUploadPath, output_content, true);
 
         if(global.writeManagedConfig && !global.managedConfigPrefix.empty())
@@ -876,7 +881,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         }
         output_content = proxyToMellow(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("mellow", argUploadPath, output_content, true);
         break;
     case "sssub"_hash:
@@ -888,37 +893,37 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             return base_content;
         }
         output_content = proxyToSSSub(base_content, nodes, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("sssub", argUploadPath, output_content, false);
         break;
     case "ss"_hash:
         writeLog(0, "Generate target: SS", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 1, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("ss", argUploadPath, output_content, false);
         break;
     case "ssr"_hash:
         writeLog(0, "Generate target: SSR", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 2, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("ssr", argUploadPath, output_content, false);
         break;
     case "v2ray"_hash:
         writeLog(0, "Generate target: v2rayN", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 4, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("v2ray", argUploadPath, output_content, false);
         break;
     case "trojan"_hash:
         writeLog(0, "Generate target: Trojan", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 8, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("trojan", argUploadPath, output_content, false);
         break;
     case "mixed"_hash:
         writeLog(0, "Generate target: Standard Subscription", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 15, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("sub", argUploadPath, output_content, false);
         break;
     case "quan"_hash:
@@ -934,7 +939,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         output_content = proxyToQuan(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("quan", argUploadPath, output_content, false);
         break;
     case "quanx"_hash:
@@ -950,7 +955,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         output_content = proxyToQuanX(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("quanx", argUploadPath, output_content, false);
         break;
     case "loon"_hash:
@@ -966,13 +971,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         output_content = proxyToLoon(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("loon", argUploadPath, output_content, false);
         break;
     case "ssd"_hash:
         writeLog(0, "Generate target: SSD", LOG_LEVEL_INFO);
         output_content = proxyToSSD(nodes, argGroupName, subInfo, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("ssd", argUploadPath, output_content, false);
         break;
     case "singbox"_hash:
@@ -988,13 +993,18 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         output_content = proxyToSingBox(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("singbox", argUploadPath, output_content, false);
         break;
     default:
         writeLog(0, "Generate target: Unspecified", LOG_LEVEL_INFO);
         *status_code = 500;
         return "Unrecognized target";
+    }
+    if(ext.chain_conversion_failed)
+    {
+        *status_code = 400;
+        return "Conversion refused: incomplete proxy chain";
     }
     writeLog(0, "Generate completed.", LOG_LEVEL_INFO);
     if(!argFilename.empty())
@@ -1154,6 +1164,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS)
     }
 
     extra_settings ext;
+    ext.source_registry = parse_set.source_registry;
     ext.sort_flag = global.enableSort;
     ext.filter_deprecated = global.filterDeprecated;
     ext.clash_new_field_name = global.clashUseNewField;
@@ -1163,9 +1174,6 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS)
     ext.tls13 = global.TLS13Flag;
     ext.clash_proxies_style = global.clashProxiesStyle;
     ext.clash_proxy_groups_style = global.clashProxyGroupsStyle;
-
-    ProxyGroupConfigs dummy_groups;
-    proxyToClash(nodes, clash, dummy_groups, false, ext);
 
     section.clear();
     ini.get_items("Proxy", section);
@@ -1196,6 +1204,11 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS)
         }
         clash[proxygroup_name].push_back(singlegroup);
     }
+
+    // Materialize known policy aliases before resolving node chain references.
+    ProxyGroupConfigs dummy_groups;
+    proxyToClash(nodes, clash, dummy_groups, false, ext);
+    if(ext.chain_conversion_failed) { *status_code = 400; return "Conversion refused: incomplete proxy chain"; }
 
     eraseElements(dummy_str_array);
     ini.get_all("Rule", "{NONAME}", dummy_str_array);

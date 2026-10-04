@@ -126,6 +126,7 @@ ENDIF()
 ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
+    src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/config/subexport_clash_preserve.cpp

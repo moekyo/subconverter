@@ -88,7 +88,7 @@ void proxyToClash(
 
     proxyToClashLegacy(nodes, yamlnode, extra_proxy_group, clashR, ext);
 
-    if(ext.nodelist)
+    if(ext.nodelist || ext.chain_conversion_failed)
         return;
     mergeGeneratedGroups(yamlnode, preserved_groups, ext.clash_new_field_name);
 }
@@ -117,6 +117,7 @@ std::string proxyToClash(
     }
 
     proxyToClash(nodes, yamlnode, extra_proxy_group, clashR, ext);
+    if(ext.chain_conversion_failed) return "";
 
     if(ext.nodelist)
         return YAML::Dump(yamlnode);
