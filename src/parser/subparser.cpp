@@ -399,17 +399,21 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes, SourceRegi
         id = GetMember(user, "id");
         aid = GetMember(user, "alterId");
         cipher = GetMember(user, "security");
-        const auto optionalObject = [](const rapidjson::Value &object, const std::string &key) {
-            return !object.HasMember(key.c_str()) || object[key.c_str()].IsObject();
+        const auto optionalObject = [](const rapidjson::Value &object, const std::string &key, bool nullable = false) {
+            return !object.HasMember(key.c_str()) || object[key.c_str()].IsObject() ||
+                   (nullable && object[key.c_str()].IsNull());
         };
-        if(!optionalObject(outbound, streamset)) return;
-        if(outbound.HasMember(streamset.c_str()))
+        // V2Ray's optional stream/transport configurations are pointers: null
+        // has the same meaning as absent. Still require an object before any
+        // member access, including for a transport the network does not use.
+        if(!optionalObject(outbound, streamset, true)) return;
+        if(outbound.HasMember(streamset.c_str()) && outbound[streamset.c_str()].IsObject())
         {
             const auto &stream = outbound[streamset.c_str()];
             net = GetMember(stream, "network");
             tls = GetMember(stream, "security");
-            if(!optionalObject(stream, wsset) || !optionalObject(stream, tcpset)) return;
-            if(net == "ws" && stream.HasMember(wsset.c_str()))
+            if(!optionalObject(stream, wsset, true) || !optionalObject(stream, tcpset, true)) return;
+            if(net == "ws" && stream.HasMember(wsset.c_str()) && stream[wsset.c_str()].IsObject())
             {
                 const auto &ws = stream[wsset.c_str()];
                 path = GetMember(ws, "path");
@@ -420,7 +424,7 @@ void explodeVmessConf(std::string content, std::vector<Proxy> &nodes, SourceRegi
                     edge = GetMember(ws["headers"], "Edge");
                 }
             }
-            if(stream.HasMember(tcpset.c_str()))
+            if(stream.HasMember(tcpset.c_str()) && stream[tcpset.c_str()].IsObject())
             {
                 const auto &tcp = stream[tcpset.c_str()];
                 if(!optionalObject(tcp, "header")) return;
@@ -3001,13 +3005,23 @@ void explode(const std::string &link, Proxy &node, SourceRegistry registry)
     if(node.Type != ProxyType::Unknown) attachSourceIdentity(node, registry);
 }
 
+static char subscriptionDelimiter(const std::string &content)
+{
+    return content.find('\n') != std::string::npos ? '\n' : content.find('\r') != std::string::npos ? '\r' : ' ';
+}
+
 static bool isRawUriSubscription(const std::string &content, bool first_line_only = false)
 {
     std::stringstream lines(content);
     std::string line;
-    while(std::getline(lines, line))
+    const char delimiter = subscriptionDelimiter(content);
+    // Space-separated feeds are one physical line. A leading comment owns
+    // that entire line; do not discover URI tokens inside its comment text.
+    const auto leading = trimWhitespace(content, true, true);
+    if(delimiter == ' ' && (startsWith(leading, "#") || startsWith(leading, ";") || startsWith(leading, "//"))) return false;
+    while(std::getline(lines, line, delimiter))
     {
-        line = trim(line);
+        line = trimWhitespace(line, true, true);
         if(line.empty() || line.front() == '#') continue;
         if(regFind(line, "^[A-Za-z][A-Za-z0-9+.-]*://")) return true;
         if(first_line_only) return false;
@@ -3025,9 +3039,11 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes, SourceRegistry regis
     std::string first_line;
     bool yaml_preamble = false;
     std::stringstream first_lines(sub);
-    while(std::getline(first_lines, first_line))
+    // Match INIReader's line boundaries and trailing-whitespace handling.
+    // Its section names are arbitrary text between '[' and ']'.
+    while(std::getline(first_lines, first_line, getLineBreak(sub)))
     {
-        first_line = trim(first_line);
+        first_line = trimWhitespace(first_line, true, true);
         if(first_line.empty() || first_line.front() == '#' || first_line.front() == ';' || startsWith(first_line, "//")) continue;
         if(startsWith(first_line, "%YAML ") || startsWith(first_line, "%TAG ")) { yaml_preamble = true; continue; }
         if(regFind(first_line, R"(^---(?:\s|$))"))
@@ -3039,7 +3055,7 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes, SourceRegistry regis
         break;
     }
     const bool ini_container = !yaml_preamble && !regFind(first_line, "^[A-Za-z][A-Za-z0-9+.-]*://") &&
-        (regFind(first_line, R"(^\[[A-Za-z][A-Za-z0-9 _-]*\]$)") ||
+        ((first_line.size() >= 2 && first_line.front() == '[' && first_line.back() == ']') ||
          regFind(first_line, R"(^[^=]+\s*=\s*(ss|custom|vmess|trojan|anytls|socks5|http|https|snell|direct|reject)\s*(,|$))") ||
          regFind(first_line, R"(^(shadowsocks|vmess|trojan|anytls|http)\s*=)"));
 
@@ -3115,13 +3131,11 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes, SourceRegistry regis
             return;
         }
         strstream << sub;
-        char delimiter = count(sub.begin(), sub.end(), '\n') < 1 ? count(sub.begin(), sub.end(), '\r') < 1 ? ' ' : '\r' : '\n';
+        const char delimiter = subscriptionDelimiter(sub);
         while(getline(strstream, strLink, delimiter))
         {
             Proxy node;
-            if(strLink.rfind('\r') != std::string::npos)
-                strLink.erase(strLink.size() - 1);
-            strLink = trim(strLink);
+            strLink = trimWhitespace(strLink, true, true);
             if(strLink.empty() || strLink.front() == '#') continue;
             explode(strLink, node, registry);
             if(strLink.empty()) continue;

@@ -315,9 +315,20 @@ def h1(gate):
     for label, value in (("null", None), ("array", []), ("string", "bad"), ("number", 7)):
         body = v2ray()
         body["outbounds"][0]["streamSettings"] = value
-        malformed["stream-" + label] = body
+        if value is None:
+            gate.protocol("H1-stream-null", body, [expected])
+        else:
+            malformed["stream-" + label] = body
         for key, network in (("tcpSettings", "tcp"), ("wsSettings", "ws")):
-            malformed[key + "-" + label] = v2ray({"network": network, key: value})
+            body = v2ray({"network": network, key: value})
+            if value is None:
+                # Optional StreamConfig pointers use null as absent. Keep
+                # these prior fixtures, correcting their over-strict oracle.
+                gate.protocol("H1-" + key + "-null", body,
+                              [dict(expected, **({"network": "ws", "ws-opts": {
+                                  "path": "/", "headers": {"Host": "fixture.invalid"}}} if network == "ws" else {}))])
+            else:
+                malformed[key + "-" + label] = body
         malformed["ws-headers-" + label] = v2ray({"network": "ws", "wsSettings": {"headers": value}})
         malformed["tcp-header-" + label] = v2ray({"network": "tcp", "tcpSettings": {"header": value}})
         malformed["tcp-request-" + label] = v2ray({"network": "tcp", "tcpSettings":
