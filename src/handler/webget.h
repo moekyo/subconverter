@@ -34,8 +34,16 @@ struct FetchResult
     std::string *content = nullptr;
     std::string *response_headers = nullptr;
     std::string *cookies = nullptr;
+    // Preserve transport completion separately from the upstream HTTP status.
+    int transport_code = 0;
+    int upstream_http_status = 0;
 };
 
+struct FetchProvenance
+{
+    std::string context_sha256;
+    std::string origin = "unavailable";
+};
 int webGet(const FetchArgument& argument, FetchResult &result);
 std::string webGet(
     const std::string &url,
@@ -43,7 +51,8 @@ std::string webGet(
     unsigned int cache_ttl = 0,
     std::string *response_headers = nullptr,
     string_icase_map *request_headers = nullptr,
-    bool force_proxy = false);
+    bool force_proxy = false,
+    FetchProvenance *provenance = nullptr);
 void flushCache();
 int webPost(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData);
 int webPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData);

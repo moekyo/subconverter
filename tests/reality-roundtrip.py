@@ -5,15 +5,17 @@ Requires PyYAML, CMake, a C++20 compiler, pkg-config, rapidjson, yaml-cpp and PC
 Builds the production static library; no server, network or Clash template needed.
 """
 import copy
+import os
 from pathlib import Path
 import subprocess
 
 import yaml
 
 root = Path(__file__).resolve().parents[1]
-build = root / "build" / "reality-roundtrip"
-subprocess.run(["cmake", "-S", str(root / "tests"), "-B", str(build)], check=True)
-subprocess.run(["cmake", "--build", str(build), "-j", "2"], check=True)
+build = Path(os.environ.get("SUBCONVERTER_TEST_BUILD", root / "build" / "reality-roundtrip"))
+if os.environ.get("SUBCONVERTER_TEST_SKIP_BUILD") != "1":
+    subprocess.run(["cmake", "-S", str(root / "tests"), "-B", str(build)], check=True)
+    subprocess.run(["cmake", "--build", str(build), "-j", "2"], check=True)
 fixture = yaml.safe_load((root / "tests/fixtures/modern-mihomo-vless-reality-hy2.yaml").read_text())
 original = fixture["proxies"][0]
 for short_id in ("00001234", "12345678"):
@@ -38,8 +40,7 @@ def projection(document):
 
 
 expected = copy.deepcopy(projection(fixture))
-# The existing HY2 parser does not carry the optional udp flag through conversion.
-expected["VPS-HY2"].pop("udp")
+# HY2 optional udp is now preserved, including explicit false in the broader suite.
 for style in ("block", "flow"):
     for mode in ("full", "list"):
         output = subprocess.run(
@@ -50,4 +51,4 @@ for style in ("block", "flow"):
         assert projection(parsed) == expected, (style, mode, parsed)
         reparsed = yaml.safe_load(yaml.safe_dump(parsed))
         assert projection(reparsed) == expected, (style, mode, reparsed)
-        print(f"REALITY round-trip {style}/{mode}: PASS (deadbeef, 00001234, 12345678; HY2 unchanged)")
+        print(f"REALITY round-trip {style}/{mode}: PASS (deadbeef, 00001234, 12345678; HY2 UDP preserved)")

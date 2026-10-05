@@ -4,24 +4,29 @@
 #include <cmath>
 #include <climits>
 #include <cctype>
+#include <set>
 
 #include "config/regmatch.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
 #include "handler/settings.h"
 #include "parser/config/proxy.h"
+#include "parser/conversion_report.h"
 #include "script/script_quickjs.h"
 #include "utils/bitwise.h"
 #include "utils/file_extra.h"
 #include "utils/ini_reader/ini_reader.h"
 #include "utils/logger.h"
 #include "utils/network.h"
+#include "utils/plugin_options.h"
 #include "utils/rapidjson_extra.h"
 #include "utils/regexp.h"
 #include "utils/stl_extra.h"
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
+#include "utils/yaml_strings.h"
 #include "nodemanip.h"
+#include "clash_group_graph.h"
 #include "ruleconvert.h"
 
 extern string_array ss_ciphers, ssr_ciphers;
@@ -29,6 +34,178 @@ extern string_array ss_ciphers, ssr_ciphers;
 const string_array clashr_protocols = {"origin", "auth_sha1_v4", "auth_aes128_md5", "auth_aes128_sha1", "auth_chain_a", "auth_chain_b"};
 const string_array clashr_obfs = {"plain", "http_simple", "http_post", "random_head", "tls1.2_ticket_auth", "tls1.2_ticket_fastauth"};
 const string_array clash_ssr_ciphers = {"rc4-md5", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "chacha20-ietf", "xchacha20", "none"};
+
+static void warnProxyConversion(const Proxy &node, const char *target, const char *reason)
+{
+    writeLog(0, getProxyTypeName(node.Type) + " -> " + target + ": " + reason, LOG_LEVEL_WARNING);
+}
+
+// Resolve only original source identities and groups actually present in this
+// target. Rendering names and rejection decisions never escape this export.
+struct ExportChains
+{
+    using Identity = const SourceNodeIdentity *;
+    std::map<std::string, std::vector<Identity>> sources;
+    std::set<const SourceNodeRegistry *> registries;
+    std::set<std::string> groups, empty_groups, invalid_groups;
+    std::map<std::string, std::vector<std::string>> group_members;
+    std::vector<Identity> emitted;
+    std::vector<std::string> final_names;
+    std::shared_ptr<ConversionReport> report;
+    explicit ExportChains(std::vector<Proxy> &nodes, extra_settings &ext)
+    {
+        report = ext.source_registry->Report;
+        if(report) report->emitted_names.clear();
+        ext.chain_conversion_failed = false;
+        addRegistry(ext.source_registry);
+        for(auto &node : nodes)
+        {
+            attachSourceIdentity(node, ext.source_registry);
+            addRegistry(node.SourceRegistryRef);
+        }
+        // Fallback identities added above belong to ext's registry.
+        sources.clear();
+        for(const auto *registry : registries)
+            for(const auto &record : registry->Records) sources[record->Name].push_back(record.get());
+    }
+    void addRegistry(const SourceRegistry &registry)
+    {
+        if(registry) registries.insert(registry.get());
+    }
+    void record(const Proxy &node)
+    {
+        if(report) report->emitted(node.SourceIdentity.get(), node.Remark);
+        emitted.push_back(node.SourceIdentity.get());
+        final_names.push_back(node.Remark);
+    }
+    Identity sourceFor(const std::string &name) const
+    {
+        const auto it = sources.find(name);
+        return it != sources.end() && it->second.size() == 1 && !groups.count(name) ? it->second.front() : nullptr;
+    }
+    std::vector<size_t> rejected(const char *target) const
+    {
+        std::set<Identity> available(emitted.begin(), emitted.end());
+        std::set<Identity> rejected, colliding;
+        for(size_t i = 0; i < emitted.size(); ++i)
+            if(groups.count(final_names[i])) colliding.insert(emitted[i]);
+        for(const auto *start : emitted)
+        {
+            std::set<Identity> path;
+            auto current = start;
+            if((start->ChainDeclared && start->Dependency.empty()) || colliding.count(start)) { rejected.insert(start); continue; }
+            while(current && !current->Dependency.empty())
+            {
+                if(colliding.count(current)) { rejected.insert(start); break; }
+                if(!path.insert(current).second) { rejected.insert(start); break; }
+                const auto &name = current->Dependency;
+                const auto found = sources.find(name);
+                if(found == sources.end() && groups.count(name))
+                {
+                    if(std::string(target) == "Surge" && name.find_first_of(",=\"\\\r\n") != std::string::npos) rejected.insert(start);
+                    break;
+                }
+                auto upstream = sourceFor(name);
+                if(!upstream || upstream->Status != SourceNodeIdentity::State::Parsed || !available.count(upstream) || colliding.count(upstream) || (upstream->ChainDeclared && upstream->Dependency.empty()))
+                { rejected.insert(start); break; }
+                current = upstream;
+            }
+        }
+        std::vector<size_t> indexes;
+        for(size_t i = 0; i < emitted.size(); ++i)
+            if(rejected.count(emitted[i])) indexes.push_back(i);
+        if(!indexes.empty())
+            writeLog(0, std::string(target) + " rejected dependent nodes: unresolved, omitted, ambiguous or cyclic source chain (content redacted)", LOG_LEVEL_WARNING);
+        return indexes;
+    }
+    void group(const std::string &name, const std::vector<std::string> &members, bool opaque = false)
+    {
+        group_members[name] = members;
+        if(members.empty() && !opaque) empty_groups.insert(name);
+        else empty_groups.erase(name);
+    }
+    bool invalidGroupChain() const
+    {
+        std::map<std::string, size_t> nodes;
+        for(size_t i = 0; i < final_names.size(); ++i) nodes[final_names[i]] = i;
+        std::set<std::string> active, complete;
+        for(size_t i = 0; i < emitted.size(); ++i)
+        {
+            if(emitted[i]->Dependency.empty()) continue;
+            std::vector<std::pair<std::string, bool>> pending{{renderedDependency(i), false}};
+            while(!pending.empty())
+            {
+                auto [name, leaving] = pending.back();
+                pending.pop_back();
+                if(leaving) { active.erase(name); complete.insert(name); continue; }
+                if(invalid_groups.count(name)) return true;
+                if(name == "DIRECT" || name == "REJECT" || name == "REJECT-TINYGIF" || name == "dns-out" || complete.count(name)) continue;
+                if(!active.insert(name).second || empty_groups.count(name) || invalid_groups.count(name)) return true;
+                pending.emplace_back(name, true);
+                const auto members = group_members.find(name);
+                const auto node = nodes.find(name);
+                if(members != group_members.end())
+                    for(auto member = members->second.rbegin(); member != members->second.rend(); ++member) pending.emplace_back(*member, false);
+                else if(node != nodes.end())
+                {
+                    const auto dependency = renderedDependency(node->second);
+                    if(!dependency.empty()) pending.emplace_back(dependency, false);
+                }
+                else if(!groups.count(name)) return true;
+            }
+        }
+        return false;
+    }
+    bool omittedChain() const
+    {
+        const std::set<Identity> available(emitted.begin(), emitted.end());
+        for(const auto &named : sources)
+            for(const auto *record : named.second)
+                if((record->ChainDeclared || !record->Dependency.empty()) && !available.count(record)) return true;
+        return false;
+    }
+    std::string renderedDependency(size_t index) const
+    {
+        const auto &name = emitted[index]->Dependency;
+        auto upstream = sourceFor(name);
+        if(!upstream) return name; // Only verified groups can reach this point.
+        const auto found = std::find(emitted.begin(), emitted.end(), upstream);
+        return found == emitted.end() ? std::string() : final_names[found - emitted.begin()];
+    }
+};
+
+static bool chainFailure(ExportChains &chains, const std::vector<size_t> &rejected, extra_settings &ext)
+{
+    if(!ext.nodelist && (!rejected.empty() || chains.omittedChain()))
+    {
+        ext.chain_conversion_failed = true;
+        writeLog(0, "Conversion refused: incomplete proxy chain; no full policy configuration emitted", LOG_LEVEL_ERROR);
+        return true;
+    }
+    return false;
+}
+
+static bool groupChainFailure(const ExportChains &chains, extra_settings &ext)
+{
+    if(!ext.nodelist && chains.invalidGroupChain())
+    {
+        ext.chain_conversion_failed = true;
+        writeLog(0, "Conversion refused: proxy chain reaches an invalid, unsupported, empty, missing or cyclic group", LOG_LEVEL_ERROR);
+        return true;
+    }
+    return false;
+}
+
+static bool anyTLSTextSafe(const Proxy &node)
+{
+    // These targets have different quoting grammars. Do not reinterpret a
+    // decoded secret or label as a second configuration option.
+    for(const auto *value : {&node.Password, &node.SNI, &node.Remark, &node.Hostname, &node.Fingerprint, &node.UnderlyingProxy})
+        if(value->find_first_of(",\"\\\r\n") != std::string::npos || trim(*value) != *value ||
+           std::any_of(value->begin(), value->end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; }))
+            return false;
+    return true;
+}
 
 std::string vmessLinkConstruct(const std::string &remarks, const std::string &add, const std::string &port, const std::string &type, const std::string &id, const std::string &aid, const std::string &net, const std::string &path, const std::string &host, const std::string &tls)
 {
@@ -129,7 +306,9 @@ bool applyMatcher(const std::string &rule, std::string &real_rule, const Proxy &
         {ProxyType::SOCKS5,       "SOCKS5"},
         {ProxyType::WireGuard,    "WIREGUARD"},
         {ProxyType::Hysteria,     "HYSTERIA"},
-        {ProxyType::Hysteria2,    "HYSTERIA2"}
+        {ProxyType::Hysteria2,    "HYSTERIA2"},
+        {ProxyType::AnyTLS,       "ANYTLS"},
+        {ProxyType::TUIC,         "TUIC"}
     };
     if(startsWith(rule, "!!GROUP="))
     {
@@ -232,9 +411,37 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist, string
 
 void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext)
 {
-    YAML::Node proxies, original_groups;
+    YAML::Node proxies, original_groups(YAML::NodeType::Sequence);
+    std::map<std::string, YAML::Node> validation_groups;
+    std::set<std::string> provider_names, generated_empty;
     std::vector<Proxy> nodelist;
     string_array remarks_list;
+    ExportChains chains(nodes, ext);
+    auto rendering_nodes = nodes;
+    if(!ext.nodelist)
+    {
+        chains.groups = {"DIRECT", "REJECT", "REJECT-DROP", "COMPATIBLE", "PASS", "PASS-RULE"};
+        const auto builtin_names = chains.groups;
+        const char *key = ext.clash_new_field_name ? "proxy-groups" : "Proxy Group";
+        // Keep one final sequence for both serialization and graph validation.
+        // Clone the base so generated replacements do not mutate YAML aliases
+        // or leave a second, stale copy for the public wrapper to merge later.
+        if(yamlnode[key].IsSequence()) original_groups.reset(YAML::Clone(yamlnode[key]));
+        if(yamlnode[key].IsSequence()) for(const auto &group : yamlnode[key])
+            if(group.IsMap() && group["name"].IsDefined() && group["name"].IsScalar())
+            {
+                const auto name = group["name"].as<std::string>();
+                if(validation_groups.count(name) || builtin_names.count(name)) chains.invalid_groups.insert(name);
+                chains.groups.insert(name);
+                validation_groups[name].reset(group);
+            }
+        if(yamlnode["proxy-providers"].IsMap())
+            for(const auto &provider : yamlnode["proxy-providers"])
+                if(provider.first.IsScalar() && provider.second.IsMap()) provider_names.insert(provider.first.as<std::string>());
+        for(const auto &group : extra_proxy_group)
+            if(group.Type == ProxyGroupType::Select || group.Type == ProxyGroupType::Relay || group.Type == ProxyGroupType::LoadBalance || group.Type == ProxyGroupType::Smart || group.Type == ProxyGroupType::URLTest || group.Type == ProxyGroupType::Fallback)
+                chains.groups.insert(group.Name);
+    }
     /// proxies style
     bool proxy_block = false, proxy_compact = false, group_block = false, group_compact = false;
     switch(hash_(ext.clash_proxies_style))
@@ -262,7 +469,7 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             break;
     }
 
-    for(Proxy &x : nodes)
+    for(Proxy &x : rendering_nodes)
     {
         YAML::Node singleproxy;
 
@@ -280,11 +487,17 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
 
         singleproxy["name"] = x.Remark;
         singleproxy["server"] = trimOf(trimOf(x.Hostname, '['), ']');
+        singleproxy["server"].SetTag("tag:yaml.org,2002:str");
         singleproxy["port"] = x.Port;
 
         switch(x.Type)
         {
         case ProxyType::Shadowsocks:
+            if(!x.Plugin.empty() && x.Plugin != "simple-obfs" && x.Plugin != "obfs-local" && x.Plugin != "v2ray-plugin")
+            {
+                warnProxyConversion(x, "Clash", "skipped: unsupported SS plugin must not become bare SS");
+                continue;
+            }
             //latest clash core removed support for chacha20 encryption
             if(ext.filter_deprecated && x.EncryptMethod == "chacha20")
                 continue;
@@ -302,15 +515,20 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["plugin-opts"]["host"] = urlDecode(getUrlArg(pluginopts, "obfs-host"));
                 break;
             case "v2ray-plugin"_hash:
+            {
+                PluginOptions options;bool mux=false;
+                if(!options.parse(x.PluginOption)||!options.mux(mux))
+                {warnProxyConversion(x,"Clash","skipped: malformed or ambiguous plugin options");continue;}
                 singleproxy["plugin"] = "v2ray-plugin";
-                singleproxy["plugin-opts"]["mode"] = getUrlArg(pluginopts, "mode");
-                singleproxy["plugin-opts"]["host"] = getUrlArg(pluginopts, "host");
-                singleproxy["plugin-opts"]["path"] = getUrlArg(pluginopts, "path");
-                singleproxy["plugin-opts"]["tls"] = pluginopts.find("tls") != std::string::npos;
-                singleproxy["plugin-opts"]["mux"] = pluginopts.find("mux") != std::string::npos;
+                singleproxy["plugin-opts"]["mode"] = options.get("mode");
+                singleproxy["plugin-opts"]["host"] = options.get("host");
+                singleproxy["plugin-opts"]["path"] = options.get("path");
+                singleproxy["plugin-opts"]["tls"] = options.tls();
+                singleproxy["plugin-opts"]["mux"] = mux;
                 if(!scv.is_undef())
                     singleproxy["plugin-opts"]["skip-cert-verify"] = scv.get();
                 break;
+            }
             }
             break;
         case ProxyType::VMess:
@@ -383,12 +601,23 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
                 singleproxy["servername"] = x.ServerName;
             if(!x.Fingerprint.empty())
                 singleproxy["client-fingerprint"] = x.Fingerprint;
+            if(!x.Alpn.empty() || x.AlpnSpecified)
+                singleproxy["alpn"] = x.Alpn;
+            if(!x.PacketEncoding.empty())
+                singleproxy["packet-encoding"] = x.PacketEncoding;
+            if(!x.CertificateFingerprint.empty())
+            {
+                singleproxy["fingerprint"] = x.CertificateFingerprint;
+                singleproxy["fingerprint"].SetTag("tag:yaml.org,2002:str");
+            }
             if(!x.PublicKey.empty())
             {
                 // REALITY short-id is a protocol hex string, not a numeric identifier.
                 // Explicit string tags avoid relying on YAML emitter/parser type inference.
                 singleproxy["reality-opts"]["public-key"] = x.PublicKey;
                 singleproxy["reality-opts"]["public-key"].SetTag("tag:yaml.org,2002:str");
+                if(!x.RealitySupportX25519MLKEM768.is_undef())
+                    singleproxy["reality-opts"]["support-x25519mlkem768"] = x.RealitySupportX25519MLKEM768.get();
                 if(!x.ShortId.empty())
                 {
                     singleproxy["reality-opts"]["short-id"] = x.ShortId;
@@ -594,7 +823,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             if (!x.Down.empty())
                 singleproxy["down"] = x.DownSpeed;
             if (!x.Password.empty())
+            {
                 singleproxy["password"] = x.Password;
+                singleproxy["password"].SetTag("tag:yaml.org,2002:str");
+            }
             if (!x.OBFS.empty())
                 singleproxy["obfs"] = x.OBFS;
             if (!x.OBFSParam.empty())
@@ -604,8 +836,11 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             if (!scv.is_undef())
                 singleproxy["skip-cert-verify"] = scv.get();
             if (!x.Fingerprint.empty())
+            {
                 singleproxy["fingerprint"] = x.Fingerprint;
-            if (!x.Alpn.empty())
+                singleproxy["fingerprint"].SetTag("tag:yaml.org,2002:str");
+            }
+            if (!x.Alpn.empty() || x.AlpnSpecified)
                 singleproxy["alpn"] = x.Alpn;
             if (!x.Ca.empty())
                 singleproxy["ca"] = x.Ca;
@@ -616,32 +851,82 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             if (x.HopInterval)
                 singleproxy["hop-interval"] = x.HopInterval;
             break;
+        case ProxyType::TUIC:
+            singleproxy["type"] = "tuic";
+            for(const auto &option : x.Tuic.Strings)
+            {
+                singleproxy[option.first] = option.second;
+                singleproxy[option.first].SetTag("tag:yaml.org,2002:str");
+            }
+            for(const auto &option : x.Tuic.Integers) singleproxy[option.first] = option.second;
+            for(const auto &option : x.Tuic.Booleans) singleproxy[option.first] = option.second;
+            if(!x.Alpn.empty() || x.AlpnSpecified) singleproxy["alpn"] = x.Alpn;
+            if(!scv.is_undef()) singleproxy["skip-cert-verify"] = scv.get();
+            break;
         case ProxyType::AnyTLS:
             singleproxy["type"] = "anytls";
             singleproxy["password"] = x.Password;
+            singleproxy["password"].SetTag("tag:yaml.org,2002:str");
             if (!x.SNI.empty())
                 singleproxy["sni"] = x.SNI;
             if (!scv.is_undef())
                 singleproxy["skip-cert-verify"] = scv.get();
+            if(!x.ClientFingerprint.empty())
+                singleproxy["client-fingerprint"] = x.ClientFingerprint;
+            if(!x.Fingerprint.empty())
+            {
+                singleproxy["fingerprint"] = x.Fingerprint;
+                singleproxy["fingerprint"].SetTag("tag:yaml.org,2002:str");
+            }
+            if(!x.Alpn.empty() || x.AlpnSpecified)
+                singleproxy["alpn"] = x.Alpn;
+            if(x.IdleSessionCheckInterval)
+                singleproxy["idle-session-check-interval"] = *x.IdleSessionCheckInterval;
+            if(x.IdleSessionTimeout)
+                singleproxy["idle-session-timeout"] = *x.IdleSessionTimeout;
+            if(x.MinIdleSession)
+                singleproxy["min-idle-session"] = *x.MinIdleSession;
             break;
         default:
+                warnProxyConversion(x, "Clash", "skipped: unsupported protocol for this output target");
             continue;
         }
 
+        if((x.Type == ProxyType::AnyTLS || x.Type == ProxyType::VLESS || x.Type == ProxyType::TUIC || x.Type == ProxyType::Hysteria2) && singleproxy["alpn"].IsSequence())
+            for(auto item : singleproxy["alpn"]) item.SetTag("tag:yaml.org,2002:str");
+
         // UDP is not supported yet in clash using snell
         // sees in https://dreamacro.github.io/clash/configuration/outbound.html#snell
-        if(udp && x.Type != ProxyType::Snell)
-            singleproxy["udp"] = true;
+        if(!udp.is_undef() && x.Type != ProxyType::Snell)
+            singleproxy["udp"] = udp.get();
+        if(!x.UnderlyingProxy.empty())
+            singleproxy["dialer-proxy"] = x.UnderlyingProxy;
         if(!tfo.is_undef())
             singleproxy["tfo"] = tfo.get();
         if(proxy_block)
             singleproxy.SetStyle(YAML::EmitterStyle::Block);
         else
             singleproxy.SetStyle(YAML::EmitterStyle::Flow);
+        preserveYamlStrings(singleproxy);
         proxies.push_back(singleproxy);
+        chains.record(x);
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
     }
+    const auto chain_rejected = chains.rejected("Clash");
+    if(chainFailure(chains, chain_rejected, ext)) { yamlnode = YAML::Node(); return; }
+    for(size_t i = 0; i < proxies.size(); ++i)
+        if(proxies[i]["dialer-proxy"].IsDefined()) proxies[i]["dialer-proxy"] = chains.renderedDependency(i);
+    for(auto rejected = chain_rejected; !rejected.empty(); rejected.pop_back())
+    {
+        const auto index = rejected.back();
+        proxies.remove(index);
+        nodelist.erase(nodelist.begin() + index);
+        remarks_list.erase(remarks_list.begin() + index);
+    }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Clash omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(proxy_compact)
         proxies.SetStyle(YAML::EmitterStyle::Flow);
@@ -709,12 +994,13 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         for(const auto& y : x.Proxies)
             groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
+        if(filtered_nodelist.empty() && x.UsingProvider.empty()) generated_empty.insert(x.Name);
+        else generated_empty.erase(x.Name);
         if(!x.UsingProvider.empty())
             singlegroup["use"] = x.UsingProvider;
         else
         {
-            if(filtered_nodelist.empty())
-                filtered_nodelist.emplace_back("DIRECT");
+            if(filtered_nodelist.empty()) filtered_nodelist.emplace_back("DIRECT");
         }
         if(!filtered_nodelist.empty())
             singlegroup["proxies"] = filtered_nodelist;
@@ -723,12 +1009,16 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         else
             singlegroup.SetStyle(YAML::EmitterStyle::Flow);
 
+        if(x.Name == "DIRECT" || x.Name == "REJECT" || x.Name == "REJECT-DROP" || x.Name == "COMPATIBLE" || x.Name == "PASS" || x.Name == "PASS-RULE") chains.invalid_groups.insert(x.Name);
         bool replace_flag = false;
-        for(auto && original_group : original_groups)
+        for(size_t i = 0; i < original_groups.size(); ++i)
         {
-            if(original_group["name"].as<std::string>() == x.Name)
+            const auto original_group = static_cast<const YAML::Node &>(original_groups)[i];
+            if(original_group.IsMap() && original_group["name"].IsDefined() && original_group["name"].IsScalar() && original_group["name"].as<std::string>() == x.Name)
             {
-                original_group.reset(singlegroup);
+                // Indexed assignment writes the sequence element; reset on
+                // an iterator value would only rebind its temporary handle.
+                original_groups[i] = singlegroup;
                 replace_flag = true;
                 break;
             }
@@ -754,6 +1044,17 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         else
             yamlnode.remove("Proxy Group");
     }
+    validation_groups.clear();
+    for(const auto &group : original_groups)
+        if(group.IsMap() && group["name"].IsDefined() && group["name"].IsScalar())
+            validation_groups[group["name"].as<std::string>()].reset(group);
+    for(const auto &[name, group] : clash_group_graph::build(proxies, validation_groups, provider_names, generated_empty))
+    {
+        chains.group(name, group.members, group.opaque);
+        if(!group.valid) chains.invalid_groups.insert(name);
+    }
+    if(groupChainFailure(chains, ext)) { yamlnode = YAML::Node(); return; }
+
 }
 
 std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf, std::vector<RulesetContent> &ruleset_content_array, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext)
@@ -771,6 +1072,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf
     }
 
     proxyToClash(nodes, yamlnode, extra_proxy_group, clashR, ext);
+    if(ext.chain_conversion_failed) return "";
 
     if(ext.nodelist)
         return YAML::Dump(yamlnode);
@@ -835,6 +1137,16 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
     std::vector<Proxy> nodelist;
     unsigned short local_port = 1080;
     string_array remarks_list;
+    ExportChains chains(nodes, ext);
+    auto rendering_nodes = nodes;
+    std::vector<std::string> generated_lines;
+    if(!ext.nodelist)
+    {
+        chains.groups = {"DIRECT", "REJECT", "REJECT-TINYGIF"};
+        for(const auto &group : extra_proxy_group)
+            if(group.Type == ProxyGroupType::Select || group.Type == ProxyGroupType::Smart || group.Type == ProxyGroupType::URLTest || group.Type == ProxyGroupType::Fallback || group.Type == ProxyGroupType::SSID ||
+               (group.Type == ProxyGroupType::LoadBalance && (surge_ver >= 1 || surge_ver == -3))) chains.groups.insert(group.Name);
+    }
 
     ini.store_any_line = true;
     // filter out sections that requires direct-save
@@ -856,8 +1168,20 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
     ini.erase_section();
     ini.set("{NONAME}", "DIRECT = direct");
 
-    for(Proxy &x : nodes)
+    for(Proxy &x : rendering_nodes)
     {
+        if((x.Type == ProxyType::Shadowsocks || x.Type == ProxyType::Hysteria2) && !anyTLSTextSafe(x))
+        {
+            warnProxyConversion(x, "Surge", "skipped: value cannot be represented safely in text output");
+            continue;
+        }
+
+        if(!x.UnderlyingProxy.empty() && (x.UnderlyingProxy.find_first_of(",\"\\\r\n") != std::string::npos))
+        {
+            warnProxyConversion(x, "Surge", "skipped: chain reference needs unsupported name normalization");
+            continue;
+        }
+
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -866,7 +1190,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
 
         processRemark(x.Remark, remarks_list);
 
-        std::string &hostname = x.Hostname, &username = x.Username, &password = x.Password, &method = x.EncryptMethod, &id = x.UserId, &transproto = x.TransferProtocol, &host = x.Host, &edge = x.Edge, &path = x.Path, &protocol = x.Protocol, &protoparam = x.ProtocolParam, &obfs = x.OBFS, &obfsparam = x.OBFSParam, &plugin = x.Plugin, &pluginopts = x.PluginOption, &underlying_proxy = x.UnderlyingProxy;
+        std::string &hostname = x.Hostname, &username = x.Username, &password = x.Password, &method = x.EncryptMethod, &id = x.UserId, &transproto = x.TransferProtocol, &host = x.Host, &edge = x.Edge, &path = x.Path, &protocol = x.Protocol, &protoparam = x.ProtocolParam, &obfs = x.OBFS, &obfsparam = x.OBFSParam, &plugin = x.Plugin, &pluginopts = x.PluginOption;
         std::string port = std::to_string(x.Port);
         bool &tlssecure = x.TLSSecure;
 
@@ -1027,6 +1351,11 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
             ini.set(real_section, "peer", "(" + generatePeer(x) + ")");
             break;
         case ProxyType::Hysteria2:
+            if(!x.Ports.empty() || !x.OBFS.empty() || (!x.Fingerprint.empty() && scv.get()))
+            {
+                warnProxyConversion(x, "Surge", "skipped: HY2 hopping, obfs or insecure pin cannot be preserved");
+                continue;
+            }
             if(surge_ver < 4)
                 continue;
             proxy = "hysteria, " + hostname + ", " + port + ", password=" + password;
@@ -1041,13 +1370,30 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
                 proxy += ",sni=" + x.SNI;
             break;
         case ProxyType::AnyTLS:
+            if(!x.Fingerprint.empty() && scv.get())
+            {
+                warnProxyConversion(x, "Surge", "skipped: insecure certificate-pin precedence is not verified");
+                continue;
+            }
+            if(!anyTLSTextSafe(x))
+            {
+                warnProxyConversion(x, "Surge", "skipped: value cannot be represented safely in text output");
+                continue;
+            }
             if(surge_ver < 4 && surge_ver != -3)
                 continue;
             proxy = "anytls, " + hostname + ", " + port + ", password=" + password;
             if(!x.SNI.empty())
                 proxy += ",sni=" + x.SNI;
+            if(!x.ClientFingerprint.empty() || !x.Alpn.empty() || x.IdleSessionCheckInterval || x.IdleSessionTimeout || x.MinIdleSession)
+                warnProxyConversion(x, "Surge", "ClientHello/ALPN/session options are not exported by this target");
+            if(!x.Fingerprint.empty())
+                proxy += ",server-cert-fingerprint-sha256=" + x.Fingerprint;
+            if(!scv.is_undef())
+                proxy += ",skip-cert-verify=" + scv.get_str();
             break;
         default:
+                warnProxyConversion(x, "Surge", "skipped: unsupported protocol for this output target");
             continue;
         }
 
@@ -1056,8 +1402,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
         if(!udp.is_undef())
             proxy += ", udp-relay=" + udp.get_str();
 
-        if (!underlying_proxy.empty())
-            proxy += ", underlying-proxy=" + underlying_proxy;
+        // Append the dependency after all target names and rejection decisions exist.
 
         if (ext.nodelist)
             output_nodelist += x.Remark + " = " + proxy + "\n";
@@ -1066,8 +1411,33 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
             ini.set("{NONAME}", x.Remark + " = " + proxy);
             nodelist.emplace_back(x);
         }
+        chains.record(x);
+        generated_lines.push_back(x.Remark + " = " + proxy);
         remarks_list.emplace_back(x.Remark);
     }
+    const auto rejected = chains.rejected("Surge");
+    if(chainFailure(chains, rejected, ext)) return "";
+    for(size_t i = 0; i < generated_lines.size(); ++i)
+        if(!chains.emitted[i]->Dependency.empty()) generated_lines[i] += ", underlying-proxy=" + chains.renderedDependency(i);
+    // Rebuild once from the resolved lines, even if no node was rejected.
+    {
+        for(auto it = rejected.rbegin(); it != rejected.rend(); ++it)
+        {
+            generated_lines.erase(generated_lines.begin() + *it);
+            remarks_list.erase(remarks_list.begin() + *it);
+            if(!ext.nodelist) nodelist.erase(nodelist.begin() + *it);
+        }
+        output_nodelist.clear();
+        ini.set_current_section("Proxy");
+        ini.erase_section();
+        ini.set("{NONAME}", "DIRECT = direct");
+        for(const auto &line : generated_lines)
+            if(ext.nodelist) output_nodelist += line + "\n";
+            else ini.set("{NONAME}", line);
+    }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Surge omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(ext.nodelist)
         return output_nodelist;
@@ -1104,8 +1474,8 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
         for(const auto &y : x.Proxies)
             groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-        if(filtered_nodelist.empty())
-            filtered_nodelist.emplace_back("DIRECT");
+        chains.group(x.Name, filtered_nodelist);
+        if(filtered_nodelist.empty()) filtered_nodelist.emplace_back("DIRECT");
 
         if(filtered_nodelist.size() == 1)
         {
@@ -1153,6 +1523,7 @@ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf
     if(ext.enable_rule_generator)
         rulesetToSurge(ini, ruleset_content_array, surge_ver, ext.overwrite_original_rules, ext.managed_config_prefix);
 
+    if(groupChainFailure(chains, ext)) return "";
     return ini.to_string();
 }
 
@@ -1164,6 +1535,12 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
 
     for(Proxy &x : nodes)
     {
+        proxyStr.clear();
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "mixed", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         std::string remark = x.Remark;
         std::string &hostname = x.Hostname, &password = x.Password, &method = x.EncryptMethod, &plugin = x.Plugin, &pluginopts = x.PluginOption, &protocol = x.Protocol, &protoparam = x.ProtocolParam, &obfs = x.OBFS, &obfsparam = x.OBFSParam, &id = x.UserId, &transproto = x.TransferProtocol, &host = x.Host, &path = x.Path, &faketype = x.FakeType;
         bool &tlssecure = x.TLSSecure;
@@ -1226,6 +1603,12 @@ std::string proxyToSingle(std::vector<Proxy> &nodes, int types, extra_settings &
             proxyStr += "#" + urlEncode(remark);
             break;
         default:
+                warnProxyConversion(x, "mixed", "skipped: unsupported protocol for this output target");
+            continue;
+        }
+        if(proxyStr.empty())
+        {
+            warnProxyConversion(x, "single-protocol URI", "skipped: protocol cannot be represented by this output");
             continue;
         }
         allLinks += proxyStr + "\n";
@@ -1254,6 +1637,11 @@ std::string proxyToSSSub(std::string base_conf, std::vector<Proxy> &nodes, extra
     rapidjson::Value proxies(rapidjson::kArrayType);
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "SS JSON", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         std::string &remark = x.Remark;
         std::string &hostname = x.Hostname;
         std::string &password = x.Password;
@@ -1324,6 +1712,17 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini, std::vector<RulesetC
     ini.erase_section();
     for(Proxy &x : nodes)
     {
+        if(!ext.nodelist && x.Type == ProxyType::Shadowsocks && !anyTLSTextSafe(x))
+        {
+            warnProxyConversion(x, "Quantumult", "skipped: value cannot be represented safely in text output");
+            continue;
+        }
+
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "Quantumult", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -1438,6 +1837,7 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini, std::vector<RulesetC
                 proxyStr = "socks://" + urlSafeBase64Encode(proxyStr);
             break;
         default:
+                warnProxyConversion(x, "Quantumult", "skipped: unsupported protocol for this output target");
             continue;
         }
 
@@ -1445,6 +1845,9 @@ void proxyToQuan(std::vector<Proxy> &nodes, INIReader &ini, std::vector<RulesetC
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
     }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Quantumult omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(ext.nodelist)
         return;
@@ -1558,6 +1961,17 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
     ini.erase_section();
     for(Proxy &x : nodes)
     {
+        if((x.Type == ProxyType::Shadowsocks || x.Type == ProxyType::Hysteria2) && !anyTLSTextSafe(x))
+        {
+            warnProxyConversion(x, "QuanX", "skipped: value cannot be represented safely in text output");
+            continue;
+        }
+
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "QuanX", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -1582,6 +1996,11 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
         switch(x.Type)
         {
         case ProxyType::VMess:
+            if(transproto != "tcp" && transproto != "ws")
+            {
+                warnProxyConversion(x, "QuanX", "skipped: unsupported VMess transport must not become TCP");
+                continue;
+            }
             if(method == "auto")
                 method = "chacha20-ietf-poly1305";
             proxyStr = "vmess = " + hostname + ":" + port + ", method=" + method + ", password=" + id;
@@ -1612,23 +2031,27 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
                             proxyStr += ", " + replaceAllDistinct(pluginopts, ";", ", ");
                         break;
                     case "v2ray-plugin"_hash:
-                        pluginopts = replaceAllDistinct(pluginopts, ";", "&");
-                        plugin = getUrlArg(pluginopts, "mode") == "websocket" ? "ws" : "";
-                        host = getUrlArg(pluginopts, "host");
-                        path = getUrlArg(pluginopts, "path");
-                        tlssecure = pluginopts.find("tls") != std::string::npos;
-                        if(tlssecure && plugin == "ws")
+                    {
+                        PluginOptions options;bool mux=false;
+                        if(!options.parse(pluginopts)||!options.mux(mux))
+                        {warnProxyConversion(x,"QuanX","skipped: malformed or ambiguous plugin options");continue;}
+                        std::string plugin_transport = options.get("mode") == "websocket" ? "ws" : "";
+                        const auto plugin_host=options.get("host"),plugin_path=options.get("path");
+                        if(plugin_host.find_first_of(",\"\\\r\n")!=std::string::npos||plugin_path.find_first_of(",\"\\\r\n")!=std::string::npos)
+                        {warnProxyConversion(x,"QuanX","skipped: plugin values need unsupported text quoting");continue;}
+                        if(options.tls() && plugin_transport == "ws")
                         {
-                            plugin += 's';
+                            plugin_transport += 's';
                             if(!tls13.is_undef())
                                 proxyStr += ", tls13=" + std::string(tls13 ? "true" : "false");
                         }
-                        proxyStr += ", obfs=" + plugin;
-                        if(!host.empty())
-                            proxyStr += ", obfs-host=" + host;
-                        if(!path.empty())
-                            proxyStr += ", obfs-uri=" + path;
+                        proxyStr += ", obfs=" + plugin_transport;
+                        if(!plugin_host.empty())
+                            proxyStr += ", obfs-host=" + plugin_host;
+                        if(!plugin_path.empty())
+                            proxyStr += ", obfs-uri=" + plugin_path;
                         break;
+                    }
                     default: continue;
                 }
             }
@@ -1657,6 +2080,11 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
             }
             break;
         case ProxyType::Trojan:
+            if(transproto != "tcp")
+            {
+                warnProxyConversion(x, "QuanX", "skipped: unsupported Trojan transport must not become TCP");
+                continue;
+            }
             proxyStr = "trojan = " + hostname + ":" + port + ", password=" + password;
             if(tlssecure)
             {
@@ -1687,11 +2115,29 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
             }
             break;
         case ProxyType::AnyTLS:
-            proxyStr = "anytls = " + hostname + ":" + port + ", password=" + password;
+            if(!anyTLSTextSafe(x))
+            {
+                warnProxyConversion(x, "QuanX", "skipped: value cannot be represented safely in text output");
+                continue;
+            }
+            if(!x.UnderlyingProxy.empty() || (!x.Fingerprint.empty() && scv.get()))
+            {
+                warnProxyConversion(x, "QuanX", "skipped: dialer-proxy or insecure certificate pin cannot be preserved");
+                continue;
+            }
+            proxyStr = "anytls = " + hostname + ":" + port + ", password=" + password + ", over-tls=true";
+            if(!x.Fingerprint.empty())
+            {
+                proxyStr += ", tls-cert-sha256=" + x.Fingerprint;
+                scv = false;
+            }
             if (!x.SNI.empty())
                 proxyStr += ", tls-host=" + x.SNI;
+            if(!x.ClientFingerprint.empty() || !x.Alpn.empty() || x.IdleSessionCheckInterval || x.IdleSessionTimeout || x.MinIdleSession)
+                warnProxyConversion(x, "QuanX", "ClientHello/ALPN/session options are not exported by this target");
             break;
         default:
+                warnProxyConversion(x, "QuanX", "skipped: unsupported protocol for this output target");
             continue;
         }
         if(!tfo.is_undef())
@@ -1706,6 +2152,9 @@ void proxyToQuanX(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Ruleset
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
     }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "QuanX omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(ext.nodelist)
         return;
@@ -1832,6 +2281,11 @@ std::string proxyToSSD(std::vector<Proxy> &nodes, std::string &group, std::strin
 
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "SSD", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         std::string &hostname = x.Hostname, &password = x.Password, &method = x.EncryptMethod, &plugin = x.Plugin, &pluginopts = x.PluginOption, &protocol = x.Protocol, &obfs = x.OBFS;
 
         switch(x.Type)
@@ -1919,6 +2373,11 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Rulese
 
     for(Proxy &x : nodes)
     {
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "Mellow", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -1981,6 +2440,7 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Rulese
             proxy = x.Remark + ", builtin, http, address=" + hostname + ", port=" + port + ", user=" + username + ", pass=" + password;
             break;
         default:
+                warnProxyConversion(x, "Mellow", "skipped: unsupported protocol for this output target");
             continue;
         }
 
@@ -1988,6 +2448,9 @@ void proxyToMellow(std::vector<Proxy> &nodes, INIReader &ini, std::vector<Rulese
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
     }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Mellow omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     ini.set_current_section("EndpointGroup");
 
@@ -2065,6 +2528,17 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
 
     for(Proxy &x : nodes)
     {
+        if((x.Type == ProxyType::Shadowsocks || x.Type == ProxyType::Hysteria2) && !anyTLSTextSafe(x))
+        {
+            warnProxyConversion(x, "Loon", "skipped: value cannot be represented safely in text output");
+            continue;
+        }
+
+        if(!x.UnderlyingProxy.empty())
+        {
+            warnProxyConversion(x, "Loon", "skipped: dialer-proxy cannot be preserved by this output");
+            continue;
+        }
         if(ext.append_proxy_type)
         {
             std::string type = getProxyTypeName(x.Type);
@@ -2166,6 +2640,11 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
             proxy += ", peers=[{" + generatePeer(x, true) + "}]";
             break;
         case ProxyType::Hysteria2:
+            if(!x.Ports.empty() || !x.OBFS.empty() || (!x.Fingerprint.empty() && scv.get()))
+            {
+                warnProxyConversion(x, "Loon", "skipped: HY2 hopping, obfs or insecure pin cannot be preserved");
+                continue;
+            }
             proxy = "hysteria2," + hostname + "," + port + ",\"" + password + "\"";
 
             if(!scv.is_undef())
@@ -2176,13 +2655,33 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
                 proxy += ",sni=" + x.SNI;
             break;
         case ProxyType::AnyTLS:
+            if(!x.Fingerprint.empty() && scv.get())
+            {
+                warnProxyConversion(x, "Loon", "skipped: insecure certificate-pin precedence is not verified");
+                continue;
+            }
+            if(!anyTLSTextSafe(x))
+            {
+                warnProxyConversion(x, "Loon", "skipped: value cannot be represented safely in text output");
+                continue;
+            }
             proxy = "anytls," + hostname + "," + port + ",\"" + password + "\"";
             if (!x.SNI.empty())
                 proxy += ",sni=" + x.SNI;
             if (!scv.is_undef())
                 proxy += ",skip-cert-verify=" + std::string(scv.get() ? "true" : "false");
+            if(!x.ClientFingerprint.empty() || !x.Alpn.empty() || x.IdleSessionCheckInterval || x.IdleSessionTimeout || x.MinIdleSession)
+                warnProxyConversion(x, "Loon", "ClientHello/ALPN/session options are not exported by this target");
+            if(!x.UnderlyingProxy.empty())
+            {
+                warnProxyConversion(x, "Loon", "skipped: dialer-proxy cannot be preserved");
+                continue;
+            }
+            if(!x.Fingerprint.empty())
+                proxy += ",tls-cert-sha256=" + x.Fingerprint;
             break;
         default:
+                warnProxyConversion(x, "Loon", "skipped: unsupported protocol for this output target");
             continue;
         }
 
@@ -2198,9 +2697,12 @@ std::string proxyToLoon(std::vector<Proxy> &nodes, const std::string &base_conf,
         {
             ini.set("{NONAME}", x.Remark + " = " + proxy);
             nodelist.emplace_back(x);
-            remarks_list.emplace_back(x.Remark);
         }
+        remarks_list.emplace_back(x.Remark);
     }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "Loon omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if(ext.nodelist)
         return output_nodelist;
@@ -2384,6 +2886,8 @@ static rapidjson::Value buildSingBoxHysteria2ServerPorts(const std::string &port
         if (is_single_port)
             port_entry = port_entry + ":" + port_entry;
 
+        std::replace(port_entry.begin(), port_entry.end(), '-', ':');
+
         result.PushBack(rapidjson::Value(port_entry.c_str(), allocator), allocator);
     }
     return result;
@@ -2395,7 +2899,15 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
     rapidjson::Value outbounds(rapidjson::kArrayType), route(rapidjson::kArrayType);
     std::vector<Proxy> nodelist;
     string_array remarks_list;
+    ExportChains chains(nodes, ext);
 
+    if(!ext.nodelist)
+    {
+        chains.groups = {"DIRECT", "REJECT", "dns-out"};
+        if(global.singBoxAddClashModes) chains.groups.insert("GLOBAL");
+        for(const auto &group : extra_proxy_group)
+            if(group.Type == ProxyGroupType::Select || group.Type == ProxyGroupType::URLTest || group.Type == ProxyGroupType::Fallback || group.Type == ProxyGroupType::LoadBalance) chains.groups.insert(group.Name);
+    }
     if (!ext.nodelist)
     {
         auto direct = buildObject(allocator, "type", "direct", "tag", "DIRECT");
@@ -2532,6 +3044,11 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
             }
             case ProxyType::Hysteria2:
             {
+                if(!x.Fingerprint.empty())
+                {
+                    warnProxyConversion(x, "sing-box", "skipped: whole-certificate pin needs a version-specific TLS mapping");
+                    continue;
+                }
                 addSingBoxCommonMembers(proxy, x, "hysteria2", allocator);
                 if (!x.Ports.empty())
                     proxy.AddMember("server_ports", buildSingBoxHysteria2ServerPorts(x.Ports, allocator), allocator);
@@ -2571,16 +3088,25 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
             }
             case ProxyType::AnyTLS:
             {
+                // Older supported sing-box versions only have SPKI pinning, which
+                // must not be substituted for Mihomo's whole-certificate SHA256.
+                if(!x.Fingerprint.empty())
+                {
+                    warnProxyConversion(x, "sing-box", "skipped: whole-certificate pin needs a version-specific TLS mapping");
+                    continue;
+                }
                 addSingBoxCommonMembers(proxy, x, "anytls", allocator);
-                rapidjson::Value users(rapidjson::kArrayType);
-                rapidjson::Value user(rapidjson::kObjectType);
-                user.AddMember("username", "sekai", allocator);
-                user.AddMember("password", rapidjson::StringRef(x.Password.c_str()), allocator);
-                users.PushBack(user, allocator);
-                proxy.AddMember("users", users, allocator);
+                proxy.AddMember("password", rapidjson::StringRef(x.Password.c_str()), allocator);
+                if(x.IdleSessionCheckInterval)
+                    proxy.AddMember("idle_session_check_interval", rapidjson::Value((std::to_string(*x.IdleSessionCheckInterval) + "s").c_str(), allocator), allocator);
+                if(x.IdleSessionTimeout)
+                    proxy.AddMember("idle_session_timeout", rapidjson::Value((std::to_string(*x.IdleSessionTimeout) + "s").c_str(), allocator), allocator);
+                if(x.MinIdleSession)
+                    proxy.AddMember("min_idle_session", *x.MinIdleSession, allocator);
                 break;
             }
             default:
+                warnProxyConversion(x, "sing-box", "skipped: unsupported protocol for this output target");
                 continue;
         }
         if (x.TLSSecure)
@@ -2607,6 +3133,13 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
             }
             if (!x.CaStr.empty())
                 tls.AddMember("certificate", rapidjson::StringRef(x.CaStr.c_str()), allocator);
+            if(x.Type == ProxyType::AnyTLS && !x.ClientFingerprint.empty())
+            {
+                rapidjson::Value utls(rapidjson::kObjectType);
+                utls.AddMember("enabled", true, allocator);
+                utls.AddMember("fingerprint", rapidjson::StringRef(x.ClientFingerprint.c_str()), allocator);
+                tls.AddMember("utls", utls, allocator);
+            }
             proxy.AddMember("tls", tls, allocator);
         }
         if (!udp.is_undef() && !udp)
@@ -2617,10 +3150,31 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
         {
             proxy.AddMember("tcp_fast_open", buildBooleanValue(tfo), allocator);
         }
+        if(!x.UnderlyingProxy.empty())
+            proxy.AddMember("detour", rapidjson::StringRef(x.UnderlyingProxy.c_str()), allocator);
         nodelist.push_back(x);
+        chains.record(x);
         remarks_list.emplace_back(x.Remark);
         outbounds.PushBack(proxy, allocator);
     }
+    const auto chain_rejected = chains.rejected("sing-box");
+    if(chainFailure(chains, chain_rejected, ext)) { json.SetNull(); return; }
+    for(size_t i = 0; i < chains.emitted.size(); ++i)
+    {
+        auto &proxy = outbounds[static_cast<rapidjson::SizeType>((ext.nodelist ? 0 : 3) + i)];
+        if(proxy.HasMember("detour")) proxy["detour"].SetString(chains.renderedDependency(i).c_str(), allocator);
+    }
+    for(auto rejected = chain_rejected; !rejected.empty(); rejected.pop_back())
+    {
+        const auto index = rejected.back();
+        const size_t prefix = ext.nodelist ? 0 : 3;
+        outbounds.Erase(outbounds.Begin() + prefix + index);
+        nodelist.erase(nodelist.begin() + index);
+        remarks_list.erase(remarks_list.begin() + index);
+    }
+    if(remarks_list.size() != nodes.size())
+        writeLog(0, "sing-box omitted " + std::to_string(nodes.size() - remarks_list.size()) + " of " + std::to_string(nodes.size()) + " nodes: unsupported protocol, transport, option or filtering", LOG_LEVEL_WARNING);
+
 
     if (ext.nodelist)
     {
@@ -2652,8 +3206,8 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
         for (const auto &y : x.Proxies)
             groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-        if (filtered_nodelist.empty())
-            filtered_nodelist.emplace_back("DIRECT");
+        chains.group(x.Name, filtered_nodelist);
+        if(filtered_nodelist.empty()) filtered_nodelist.emplace_back("DIRECT");
 
         rapidjson::Value group(rapidjson::kObjectType);
 
@@ -2688,9 +3242,11 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
         {
             global_group["outbounds"].PushBack(rapidjson::Value(x.c_str(), allocator), allocator);
         }
+        chains.group("GLOBAL", remarks_list);
         outbounds.PushBack(global_group, allocator);
     }
 
+    if(groupChainFailure(chains, ext)) { json.SetNull(); return; }
     json | AddMemberOrReplace("outbounds", outbounds, allocator);
 }
 
@@ -2714,7 +3270,10 @@ std::string proxyToSingBox(std::vector<Proxy> &nodes, const std::string &base_co
         json.SetObject();
     }
 
-    proxyToSingBox(nodes, json, ruleset_content_array, extra_proxy_group, ext);
+    for(auto &node : nodes) attachSourceIdentity(node, ext.source_registry);
+    auto rendering_nodes = nodes;
+    proxyToSingBox(rendering_nodes, json, ruleset_content_array, extra_proxy_group, ext);
+    if(ext.chain_conversion_failed) return "";
 
     if(ext.nodelist || !ext.enable_rule_generator)
         return json | SerializeObject();

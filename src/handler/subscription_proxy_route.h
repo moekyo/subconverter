@@ -5,12 +5,82 @@
 #include <cctype>
 #include <string>
 #include <vector>
+#include "utils/ip_literal.h"
 
 struct SubscriptionProxyRoute
 {
     std::string host;
     std::string proxy;
 };
+
+// A forced route must describe an actual curl proxy, never a URL rewrite.
+// Invalid descriptors fail closed before a cache hit or network attempt.
+inline bool normalizeForcedSubscriptionProxy(const std::string &proxy, std::string &normalized)
+{
+    normalized.clear();
+    if(proxy.empty() || std::any_of(proxy.begin(), proxy.end(), [](unsigned char c) { return c <= 0x20 || c == 0x7f; })) return false;
+    const auto separator = proxy.find("://");
+    const bool bare = separator == std::string::npos;
+    auto scheme = bare ? std::string("http") : proxy.substr(0, separator);
+    std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char c) { return std::tolower(c); });
+    if(scheme != "http" && scheme != "https" && scheme != "socks4" && scheme != "socks4a" && scheme != "socks5" && scheme != "socks5h") return false;
+    auto authority = bare ? proxy : proxy.substr(separator + 3);
+    const auto path = authority.find_first_of("/?#");
+    if(path != std::string::npos && (bare || authority.substr(path) != "/")) return false;
+    authority.erase(path == std::string::npos ? authority.size() : path);
+    auto endpoint = authority;
+    const auto user = endpoint.find('@');
+    if(user != std::string::npos)
+    {
+        if(user == 0 || endpoint.find('@', user + 1) != std::string::npos) return false;
+        endpoint.erase(0, user + 1);
+    }
+    if(endpoint.empty()) return false;
+    std::string host, port;
+    if(endpoint.front() == '[')
+    {
+        const auto bracket = endpoint.find(']');
+        if(bracket == std::string::npos || !isIPv6Literal(endpoint.substr(1, bracket - 1))) return false;
+        if(bracket + 1 < endpoint.size())
+        {
+            if(endpoint[bracket + 1] != ':') return false;
+            port = endpoint.substr(bracket + 2);
+            if(port.empty()) return false;
+        }
+    }
+    else
+    {
+        const auto colon = endpoint.find(':');
+        host = endpoint.substr(0, colon);
+        if(host.empty() || std::any_of(host.begin(), host.end(), [](unsigned char c) { return !(std::isalnum(c) || c == '.' || c == '-' || c == '_'); })) return false;
+        if(colon != std::string::npos)
+        {
+            port = endpoint.substr(colon + 1);
+            if(port.empty()) return false;
+        }
+    }
+    // Restore the established host:port syntax without treating NONE/SYSTEM or
+    // cors: pseudo-proxies as arbitrary default-HTTP hostnames.
+    if(bare && port.empty()) return false;
+    if(!port.empty())
+    {
+        unsigned int value = 0;
+        for(unsigned char c : port)
+        {
+            if(c < '0' || c > '9') return false;
+            value = value * 10 + c - '0';
+            if(value > 65535) return false;
+        }
+        if(value == 0) return false;
+    }
+    normalized = scheme + "://" + authority;
+    return true;
+}
+inline bool isSupportedForcedSubscriptionProxy(const std::string &proxy)
+{
+    std::string normalized;
+    return normalizeForcedSubscriptionProxy(proxy, normalized);
+}
 
 inline std::string normalizeSubscriptionProxyHost(std::string host)
 {

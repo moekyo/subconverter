@@ -2,6 +2,8 @@
 
 This fork directly adds fallback health-check field support in the source code for Mihomo usage — no build-time patching.
 
+For the selective protocol work, tested matrix, limitations, and remaining security gates, see [Selective protocol upgrades](docs/SELECTIVE_PROTOCOL_UPGRADES.md) and [PR #1 review fixes](docs/reviews/PR1_REVIEW_FIXES.md), [second-review fixes and limits](docs/reviews/PR1_SECOND_REVIEW_FIXES.md), and [third-review repairs and actual group member checks](docs/reviews/PR1_THIRD_REVIEW_FIXES.md).
+
 ## What this build adds
 
 ### Modern Mihomo node preservation
@@ -20,7 +22,7 @@ For Clash/Mihomo source → Clash/Mihomo target conversion, this fork now keeps 
 
 Hysteria2 Clash output also preserves the input `fingerprint` field. That matters for certificate pinning when the server uses a self-signed certificate.
 
-The VLESS change is intentionally scoped to Clash/Mihomo input/output. Other target formats keep their existing behavior rather than receiving speculative VLESS mappings.
+VLESS output remains scoped to Clash/Mihomo. Validated VLESS share URIs are also accepted; other target formats do not receive speculative VLESS mappings. See the selective-upgrade matrix and limitations above.
 
 ### Fallback health-check fields
 

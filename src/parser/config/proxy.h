@@ -3,11 +3,15 @@
 
 #include <string>
 #include <vector>
+#include <optional>
+#include <map>
+#include <memory>
 
 #include "utils/tribool.h"
 
 using String = std::string;
 using StringArray = std::vector<String>;
+struct ConversionReport;
 
 enum class ProxyType
 {
@@ -25,6 +29,7 @@ enum class ProxyType
     Hysteria2,
     AnyTLS,
     VLESS,
+    TUIC,
 };
 
 inline String getProxyTypeName(ProxyType type)
@@ -57,10 +62,44 @@ inline String getProxyTypeName(ProxyType type)
         return "AnyTLS";
     case ProxyType::VLESS:
         return "VLESS";
+    case ProxyType::TUIC:
+        return "TUIC";
     default:
         return "Unknown";
     }
 }
+
+// Mihomo-specific TUIC options are typed and explicitly allowlisted by the parser.
+// An absent option stays absent, so the client keeps its own versioned defaults.
+struct TuicOptions
+{
+    std::map<String, String> Strings;
+    std::map<String, uint32_t> Integers;
+    std::map<String, bool> Booleans;
+};
+
+// Request-local source identity survives parser rejection, filtering and renaming.
+// Exporters may read this state but never store target-specific decisions here.
+struct SourceNodeIdentity
+{
+    enum class State { Rejected, Parsed, Filtered };
+    std::string Name, Dependency;
+    bool ChainDeclared = false;
+    State Status = State::Rejected;
+};
+struct SourceNodeRegistry
+{
+    std::shared_ptr<ConversionReport> Report;
+    std::vector<std::shared_ptr<SourceNodeIdentity>> Records;
+    std::shared_ptr<SourceNodeIdentity> reserve(const std::string &name)
+    {
+        auto record = std::make_shared<SourceNodeIdentity>();
+        record->Name = name;
+        Records.push_back(record);
+        return record;
+    }
+};
+using SourceRegistry = std::shared_ptr<SourceNodeRegistry>;
 
 struct Proxy
 {
@@ -69,6 +108,8 @@ struct Proxy
     uint32_t GroupId = 0;
     String Group;
     String Remark;
+    SourceRegistry SourceRegistryRef;
+    std::shared_ptr<SourceNodeIdentity> SourceIdentity;
     String Hostname;
     uint16_t Port = 0;
 
@@ -87,6 +128,9 @@ struct Proxy
     String FakeType;
     String Flow;
     String ShortId;
+    String PacketEncoding;
+    String CertificateFingerprint;
+    tribool RealitySupportX25519MLKEM768;
     bool TLSSecure = false;
 
     String Host;
@@ -120,22 +164,56 @@ struct Proxy
 
     String Ports;
     String Up;
-    uint32_t UpSpeed;
+    uint32_t UpSpeed = 0;
     String Down;
-    uint32_t DownSpeed;
+    uint32_t DownSpeed = 0;
     String AuthStr;
     String SNI;
     String Fingerprint;
+    // Keep certificate pinning distinct from the TLS ClientHello fingerprint.
+    String ClientFingerprint;
+    std::optional<uint32_t> IdleSessionCheckInterval;
+    std::optional<uint32_t> IdleSessionTimeout;
+    std::optional<uint32_t> MinIdleSession;
     String Ca;
     String CaStr;
-    uint32_t RecvWindowConn;
-    uint32_t RecvWindow;
+    uint32_t RecvWindowConn = 0;
+    uint32_t RecvWindow = 0;
     tribool DisableMtuDiscovery;
-    uint32_t HopInterval;
+    uint32_t HopInterval = 0;
     StringArray Alpn;
+    bool AlpnSpecified = false;
+    TuicOptions Tuic;
 
     uint32_t CWND = 0;
 };
+
+inline void attachSourceIdentity(Proxy &node, const SourceRegistry &registry,
+                                 std::shared_ptr<SourceNodeIdentity> record = {})
+{
+    if(node.SourceIdentity)
+    {
+        if(node.SourceIdentity->Status != SourceNodeIdentity::State::Rejected) return;
+        record = node.SourceIdentity;
+    }
+    if(!record) record = registry->reserve(node.Remark);
+    record->Name = node.Remark; // Includes a parser-derived default or QX tag.
+    record->Status = SourceNodeIdentity::State::Parsed;
+    record->Dependency = node.UnderlyingProxy;
+    record->ChainDeclared = record->ChainDeclared || !node.UnderlyingProxy.empty();
+    node.SourceRegistryRef = registry;
+    node.SourceIdentity = std::move(record);
+}
+inline void reserveSourceIdentity(Proxy &node, const SourceRegistry &registry, const std::string &name)
+{
+    if(!registry || node.SourceIdentity) return;
+    node.SourceRegistryRef = registry;
+    node.SourceIdentity = registry->reserve(name);
+}
+inline void markSourceFiltered(const Proxy &node)
+{
+    if(node.SourceIdentity) node.SourceIdentity->Status = SourceNodeIdentity::State::Filtered;
+}
 
 #define SS_DEFAULT_GROUP "SSProvider"
 #define SSR_DEFAULT_GROUP "SSRProvider"
@@ -148,5 +226,6 @@ struct Proxy
 #define HYSTERIA_DEFAULT_GROUP "HysteriaProvider"
 #define HYSTERIA2_DEFAULT_GROUP "Hysteria2Provider"
 #define ANYTLS_DEFAULT_GROUP "AnyTLSProvider"
+#define TUIC_DEFAULT_GROUP "TUICProvider"
 
 #endif // PROXY_H_INCLUDED

@@ -16,6 +16,7 @@
 #include "utils/lock.h"
 #include "utils/logger.h"
 #include "utils/urlencode.h"
+#include "utils/sha256.h"
 #include "version.h"
 #include "webget.h"
 
@@ -200,6 +201,19 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
 //static std::string curlGet(const std::string &url, const std::string &proxy, std::string &response_headers, CURLcode &return_code, const string_map &request_headers)
 static int curlGet(const FetchArgument &argument, FetchResult &result)
 {
+    result.transport_code = CURLE_OK;
+    result.upstream_http_status = 0;
+    std::string normalized_proxy = argument.proxy;
+    if(argument.force_proxy && !normalizeForcedSubscriptionProxy(argument.proxy, normalized_proxy))
+    {
+        *result.status_code = 0;
+        result.transport_code = CURLE_COULDNT_CONNECT;
+        if(result.content) result.content->clear();
+        if(result.response_headers) result.response_headers->clear();
+        if(result.cookies) result.cookies->clear();
+        writeLog(0, "Forced subscription proxy is invalid or unsupported; refusing fetch.", LOG_LEVEL_ERROR);
+        return 0;
+    }
     CURL *curl_handle;
     std::string *data = result.content, new_url = argument.url;
     const bool strip_fingerprint = stripFingerprintMarker(new_url);
@@ -220,7 +234,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
         }
         else
         {
-            curl_easy_setopt(curl_handle, CURLOPT_PROXY, argument.proxy.data());
+            curl_easy_setopt(curl_handle, CURLOPT_PROXY, normalized_proxy.data());
             if(argument.force_proxy)
                 curl_easy_setopt(curl_handle, CURLOPT_NOPROXY, "");
         }
@@ -300,6 +314,10 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     unsigned int fail_count = 0, max_fails = 1;
     while(true)
     {
+        // Every attempt is a distinct response, including reused result objects.
+        if(data) data->clear();
+        if(result.response_headers) result.response_headers->clear();
+        if(result.cookies) result.cookies->clear();
         retVal = curl_easy_perform(curl_handle);
         if(retVal == CURLE_OK || max_fails <= fail_count || global.APIMode)
             break;
@@ -309,7 +327,9 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
 
     long code = 0;
     curl_easy_getinfo(curl_handle, CURLINFO_HTTP_CODE, &code);
-    *result.status_code = code;
+    result.upstream_http_status = static_cast<int>(code);
+    result.transport_code = static_cast<int>(retVal);
+    *result.status_code = retVal == CURLE_OK ? static_cast<int>(code) : 0;
 
     if(result.cookies)
     {
@@ -370,26 +390,52 @@ std::string webGet(
     unsigned int cache_ttl,
     std::string *response_headers,
     string_icase_map *request_headers,
-    bool force_proxy)
+    bool force_proxy,
+    FetchProvenance *provenance)
 {
+    if(provenance) *provenance = FetchProvenance{};
+    std::string normalized_proxy = proxy;
+    if(force_proxy && !normalizeForcedSubscriptionProxy(proxy, normalized_proxy))
+    {
+        if(response_headers) response_headers->clear();
+        writeLog(0, "Forced subscription proxy is invalid or unsupported; refusing fetch and cached fallback.", LOG_LEVEL_ERROR);
+        return "";
+    }
     int return_code = 0;
     std::string content;
 
     FetchArgument argument {
-        HTTP_GET, url, proxy, nullptr, request_headers, nullptr, cache_ttl, false, force_proxy};
+        HTTP_GET, url, normalized_proxy, nullptr, request_headers, nullptr, cache_ttl, false, force_proxy};
     FetchResult fetch_res {&return_code, &content, response_headers, nullptr};
 
     if (startsWith(url, "data:"))
+    {
+        if(provenance) {provenance->origin="data";provenance->context_sha256=sha256("data:"+url);}
         return dataGet(url);
+    }
+    // Use exactly the cache namespace inputs as the private fetch witness,
+    // including requests with TTL=0. This does not change cache keys or policy.
+    std::string cache_identity = "fetch-cache-v2\n" + url;
+    if(request_headers)
+    {
+        std::string context = "headers-present\n";
+        for(const auto &entry : *request_headers)
+        {
+            auto key = entry.first;
+            std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
+            context += std::to_string(key.size()) + ":" + key + std::to_string(entry.second.size()) + ":" + entry.second;
+        }
+        cache_identity += "\nrequest-context-md5:" + getMD5(context);
+    }
+    if(!normalized_proxy.empty()) cache_identity += "\nproxy-md5:" + getMD5(normalized_proxy);
+    if(force_proxy) cache_identity += "\nforce-proxy:1";
+    if(provenance) provenance->context_sha256=sha256(cache_identity);
     // cache system
     if(cache_ttl > 0)
     {
         md("cache");
-        std::string cache_identity = url;
-        if(!proxy.empty())
-            cache_identity += "\nproxy-md5:" + getMD5(proxy);
-        if(force_proxy)
-            cache_identity += "\nforce-proxy:1";
+        // Version the namespace so old entries lacking request context cannot
+        // satisfy authenticated requests after the fix. Values are only hashed.
         const std::string url_md5 = getMD5(cache_identity);
         const std::string path = "cache/" + url_md5, path_header = path + "_header";
         struct stat result {};
@@ -398,6 +444,7 @@ std::string webGet(
             time_t mtime = result.st_mtime, now = time(nullptr); // get cache modified time and current time
             if(difftime(now, mtime) <= cache_ttl) // within TTL
             {
+                if(provenance) provenance->origin="cache";
                 writeLog(0, "CACHE HIT: '" + url + "', using local cache.");
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
@@ -412,8 +459,9 @@ std::string webGet(
             writeLog(0, "CACHE NOT EXIST: '" + url + "', creating new cache.");
         //content = curlGet(url, proxy, response_headers, return_code); // try to fetch data
         curlGet(argument, fetch_res);
-        if(return_code == 200) // success, save new cache
+        if(return_code == 200 && fetch_res.transport_code == CURLE_OK) // complete response only
         {
+            if(provenance) provenance->origin="network";
             //guarded_mutex guard(cache_rw_lock);
             cache_rw_lock.writeLock();
             defer(cache_rw_lock.writeUnlock();)
@@ -425,6 +473,7 @@ std::string webGet(
         {
             if(fileExist(path) && global.serveCacheOnFetchFail) // failed, check if cache exist
             {
+                if(provenance) provenance->origin="stale-cache";
                 writeLog(0, "Fetch failed. Serving cached content."); // cache exist, serving cache
                 //guarded_mutex guard(cache_rw_lock);
                 cache_rw_lock.readLock();
@@ -440,6 +489,7 @@ std::string webGet(
     }
     //return curlGet(url, proxy, response_headers, return_code);
     curlGet(argument, fetch_res);
+    if(provenance && return_code == 200 && fetch_res.transport_code == CURLE_OK) provenance->origin="network";
     return content;
 }
 

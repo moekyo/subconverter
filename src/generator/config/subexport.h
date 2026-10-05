@@ -17,6 +17,8 @@
 
 struct extra_settings
 {
+    SourceRegistry source_registry = std::make_shared<SourceNodeRegistry>();
+    bool chain_conversion_failed = false;
     bool enable_rule_generator = true;
     bool overwrite_original_rules = true;
     RegexMatchConfigs rename_array;

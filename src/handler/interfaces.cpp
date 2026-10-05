@@ -7,6 +7,7 @@
 
 #include "config/binding.h"
 #include "generator/config/nodemanip.h"
+#include "parser/conversion_report.h"
 #include "generator/config/ruleconvert.h"
 #include "generator/config/subexport.h"
 #include "generator/template/templates.h"
@@ -339,7 +340,7 @@ void checkExternalBase(const std::string &path, std::string &dest)
         dest = path;
 }
 
-std::string subconverter(RESPONSE_CALLBACK_ARGS)
+static std::string subconverterImpl(Request &request, Response &response, const SourceRegistry &registry)
 {
     auto &argument = request.argument;
     int *status_code = &response.status_code;
@@ -389,6 +390,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     string_array lIncludeRemarks = global.includeRemarks, lExcludeRemarks = global.excludeRemarks;
     std::vector<RulesetContent> lRulesetContent;
     extra_settings ext;
+    if(registry) ext.source_registry = registry;
     std::string subInfo, dummy;
     int interval = !argUpdateInterval.empty() ? to_int(argUpdateInterval, global.updateInterval) : global.updateInterval;
     bool authorized = !global.APIMode || getUrlArg(argument, "token") == global.accessToken, strict = !argUpdateStrict.empty() ? argUpdateStrict == "true" : global.updateStrict;
@@ -458,6 +460,12 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     ext.udp.define(argUDP).define(global.UDPFlag);
     ext.skip_cert_verify.define(argSkipCertVerify).define(global.skipCertVerify);
     ext.tls13.define(argTLS13).define(global.TLS13Flag);
+    if(registry && registry->Report)
+    {
+        if(!ext.udp.is_undef()) registry->Report->configured_defaults["udp"]=ext.udp.get();
+        if(!ext.tfo.is_undef()) registry->Report->configured_defaults["tfo"]=ext.tfo.get();
+        if(!ext.skip_cert_verify.is_undef()) registry->Report->configured_defaults["skip-cert-verify"]=ext.skip_cert_verify.get();
+    }
 
     ext.sort_flag = argSort.get(global.enableSort);
     argUseSortScript.define(!global.sortScript.empty());
@@ -642,6 +650,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     int groupID = 0;
 
     parse_settings parse_set;
+    parse_set.source_registry = ext.source_registry;
     parse_set.proxy = &proxy;
     parse_set.exclude_remarks = &lExcludeRemarks;
     parse_set.include_remarks = &lIncludeRemarks;
@@ -758,7 +767,11 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             {
                 ctx.eval(filterScript);
                 auto filter = (std::function<bool(const Proxy&)>) ctx.eval("filter");
-                nodes.erase(std::remove_if(nodes.begin(), nodes.end(), filter), nodes.end());
+                nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [&](const Proxy &node) {
+                    const bool drop = filter(node);
+                    if(drop) markSourceFiltered(node);
+                    return drop;
+                }), nodes.end());
             }
             catch(qjs::exception)
             {
@@ -819,7 +832,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             output_content = proxyToClash(nodes, base_content, lRulesetContent, lCustomProxyGroups, argTarget == "clashr", ext);
         }
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist(argTarget, argUploadPath, output_content, false);
         break;
     case "surge"_hash:
@@ -830,7 +843,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         {
             output_content = proxyToSurge(nodes, base_content, dummy_ruleset, dummy_group, intSurgeVer, ext);
 
-            if(argUpload)
+            if(argUpload && !ext.chain_conversion_failed)
                 uploadGist("surge" + argSurgeVer + "list", argUploadPath, output_content, true);
         }
         else
@@ -842,7 +855,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             }
             output_content = proxyToSurge(nodes, base_content, lRulesetContent, lCustomProxyGroups, intSurgeVer, ext);
 
-            if(argUpload)
+            if(argUpload && !ext.chain_conversion_failed)
                 uploadGist("surge" + argSurgeVer, argUploadPath, output_content, true);
 
             if(global.writeManagedConfig && !global.managedConfigPrefix.empty())
@@ -859,7 +872,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             return base_content;
         }
         output_content = proxyToSurge(nodes, base_content, lRulesetContent, lCustomProxyGroups, -3, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("surfboard", argUploadPath, output_content, true);
 
         if(global.writeManagedConfig && !global.managedConfigPrefix.empty())
@@ -876,7 +889,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         }
         output_content = proxyToMellow(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("mellow", argUploadPath, output_content, true);
         break;
     case "sssub"_hash:
@@ -888,37 +901,37 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             return base_content;
         }
         output_content = proxyToSSSub(base_content, nodes, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("sssub", argUploadPath, output_content, false);
         break;
     case "ss"_hash:
         writeLog(0, "Generate target: SS", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 1, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("ss", argUploadPath, output_content, false);
         break;
     case "ssr"_hash:
         writeLog(0, "Generate target: SSR", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 2, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("ssr", argUploadPath, output_content, false);
         break;
     case "v2ray"_hash:
         writeLog(0, "Generate target: v2rayN", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 4, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("v2ray", argUploadPath, output_content, false);
         break;
     case "trojan"_hash:
         writeLog(0, "Generate target: Trojan", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 8, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("trojan", argUploadPath, output_content, false);
         break;
     case "mixed"_hash:
         writeLog(0, "Generate target: Standard Subscription", LOG_LEVEL_INFO);
         output_content = proxyToSingle(nodes, 15, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("sub", argUploadPath, output_content, false);
         break;
     case "quan"_hash:
@@ -934,7 +947,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         output_content = proxyToQuan(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("quan", argUploadPath, output_content, false);
         break;
     case "quanx"_hash:
@@ -950,7 +963,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         output_content = proxyToQuanX(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("quanx", argUploadPath, output_content, false);
         break;
     case "loon"_hash:
@@ -966,13 +979,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         output_content = proxyToLoon(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("loon", argUploadPath, output_content, false);
         break;
     case "ssd"_hash:
         writeLog(0, "Generate target: SSD", LOG_LEVEL_INFO);
         output_content = proxyToSSD(nodes, argGroupName, subInfo, ext);
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("ssd", argUploadPath, output_content, false);
         break;
     case "singbox"_hash:
@@ -988,7 +1001,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         output_content = proxyToSingBox(nodes, base_content, lRulesetContent, lCustomProxyGroups, ext);
 
-        if(argUpload)
+        if(argUpload && !ext.chain_conversion_failed)
             uploadGist("singbox", argUploadPath, output_content, false);
         break;
     default:
@@ -996,10 +1009,40 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         *status_code = 500;
         return "Unrecognized target";
     }
+    if(ext.chain_conversion_failed)
+    {
+        *status_code = 400;
+        return "Conversion refused: incomplete proxy chain";
+    }
     writeLog(0, "Generate completed.", LOG_LEVEL_INFO);
     if(!argFilename.empty())
         response.headers.emplace("Content-Disposition", "attachment; filename=\"" + argFilename + "\"; filename*=utf-8''" + urlEncode(argFilename));
     return output_content;
+}
+
+std::string subconverter(RESPONSE_CALLBACK_ARGS)
+{
+    const auto version = getUrlArg(request.argument, "completeness");
+    if(version.empty()) return subconverterImpl(request, response, {});
+    response.content_type = "application/vnd.subconverter.completeness+json";
+    response.headers["Cache-Control"] = "no-store";
+    const auto nonce = getUrlArg(request.argument, "report_nonce");
+    auto registry = std::make_shared<SourceNodeRegistry>();
+    registry->Report = std::make_shared<ConversionReport>(nonce);
+    std::string output;
+    if(version != "1" || nonce.size() != 32 || !std::all_of(nonce.begin(), nonce.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }) || !getUrlArg(request.argument, "upload").empty() || request.method == "HEAD")
+    {
+        response.status_code = 400;
+        registry->Report->request_failure = "REQUEST_UNVERIFIED";
+    }
+    else
+    {
+        try { output = subconverterImpl(request, response, registry); }
+        catch(const std::exception &) { response.status_code = 400; registry->Report->request_failure = "CONVERSION_FAILED"; }
+    }
+    return registry->Report->finish(getUrlArg(request.argument, "target"), output, response.status_code);
 }
 
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS)
@@ -1154,6 +1197,7 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS)
     }
 
     extra_settings ext;
+    ext.source_registry = parse_set.source_registry;
     ext.sort_flag = global.enableSort;
     ext.filter_deprecated = global.filterDeprecated;
     ext.clash_new_field_name = global.clashUseNewField;
@@ -1163,9 +1207,6 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS)
     ext.tls13 = global.TLS13Flag;
     ext.clash_proxies_style = global.clashProxiesStyle;
     ext.clash_proxy_groups_style = global.clashProxyGroupsStyle;
-
-    ProxyGroupConfigs dummy_groups;
-    proxyToClash(nodes, clash, dummy_groups, false, ext);
 
     section.clear();
     ini.get_items("Proxy", section);
@@ -1196,6 +1237,11 @@ std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS)
         }
         clash[proxygroup_name].push_back(singlegroup);
     }
+
+    // Materialize known policy aliases before resolving node chain references.
+    ProxyGroupConfigs dummy_groups;
+    proxyToClash(nodes, clash, dummy_groups, false, ext);
+    if(ext.chain_conversion_failed) { *status_code = 400; return "Conversion refused: incomplete proxy chain"; }
 
     eraseElements(dummy_str_array);
     ini.get_all("Rule", "{NONAME}", dummy_str_array);

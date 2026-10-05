@@ -22,10 +22,9 @@ OPTION(USING_MALLOC_TRIM "Call malloc_trim after processing request to lower mem
 #OPTION(USING_MBEDTLS "Use mbedTLS instead of OpenSSL for MD5 calculation." OFF)
 OPTION(BUILD_STATIC_LIBRARY "Build a static library containing only the essential part." OFF)
 
-# Keep the upstream Clash exporter byte-for-byte intact and compile its two
-# overloads under private legacy symbols. subexport_clash_preserve.cpp exposes
-# the public symbols and adds generic preservation of proxy groups declared by
-# the Clash base before custom groups are generated.
+# Compile the conversion implementation under private legacy symbols. The
+# public wrapper handles rule rendering; group construction and validation
+# share the same final sequence inside the conversion implementation.
 SET_SOURCE_FILES_PROPERTIES(
     src/generator/config/subexport.cpp
     PROPERTIES COMPILE_DEFINITIONS "proxyToClash=proxyToClashLegacy")
@@ -53,6 +52,8 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/main.cpp
     src/parser/infoparser.cpp
     src/parser/subparser.cpp
+    src/parser/conversion_report.cpp
+    src/parser/conversion_uri.cpp
     src/script/cron.cpp
     src/script/script_quickjs.cpp
 #    src/server/webserver_libevent.cpp
@@ -126,12 +127,15 @@ ENDIF()
 ELSE() #BUILD_STATIC_LIBRARY
 
 ADD_LIBRARY(${BUILD_TARGET_NAME} STATIC
+    src/generator/config/nodemanip.cpp
     src/generator/config/ruleconvert.cpp
     src/generator/config/subexport.cpp
     src/generator/config/subexport_clash_preserve.cpp
     src/generator/template/templates.cpp
     src/lib/wrapper.cpp
     src/parser/subparser.cpp
+    src/parser/conversion_report.cpp
+    src/parser/conversion_uri.cpp
     src/utils/base64/base64.cpp
     src/utils/codepage.cpp
     src/utils/logger.cpp

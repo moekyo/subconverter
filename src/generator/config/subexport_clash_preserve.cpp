@@ -5,8 +5,8 @@
 #include "utils/logger.h"
 
 // CMake compiles subexport.cpp with proxyToClash renamed to these legacy
-// symbols. Keeping the original implementation intact lets this wrapper add one
-// generic behavior: base-file proxy groups survive custom-group generation.
+// symbols. This wrapper exposes the public overloads and renders rules after
+// the implementation has constructed and validated the final proxy groups.
 std::string proxyToClashLegacy(
     std::vector<Proxy> &nodes,
     const std::string &base_conf,
@@ -22,60 +22,6 @@ void proxyToClashLegacy(
     bool clashR,
     extra_settings &ext);
 
-namespace
-{
-YAML::Node cloneSequence(const YAML::Node &node)
-{
-    if(!node.IsSequence())
-        return YAML::Node();
-    return YAML::Load(YAML::Dump(node));
-}
-
-void mergeGeneratedGroups(
-    YAML::Node &yamlnode,
-    YAML::Node preserved_groups,
-    bool clash_new_field_name)
-{
-    if(!preserved_groups.IsSequence())
-        return;
-
-    const char *group_key = clash_new_field_name ? "proxy-groups" : "Proxy Group";
-    YAML::Node generated_groups = yamlnode[group_key];
-    if(!generated_groups.IsSequence())
-    {
-        yamlnode[group_key] = preserved_groups;
-        return;
-    }
-
-    for(const auto &generated_group : generated_groups)
-    {
-        if(!generated_group["name"].IsDefined())
-        {
-            preserved_groups.push_back(generated_group);
-            continue;
-        }
-
-        const std::string generated_name = generated_group["name"].as<std::string>();
-        bool replaced = false;
-        for(auto &&preserved_group : preserved_groups)
-        {
-            if(!preserved_group["name"].IsDefined())
-                continue;
-            if(preserved_group["name"].as<std::string>() == generated_name)
-            {
-                preserved_group.reset(generated_group);
-                replaced = true;
-                break;
-            }
-        }
-        if(!replaced)
-            preserved_groups.push_back(generated_group);
-    }
-
-    yamlnode[group_key] = preserved_groups;
-}
-}
-
 void proxyToClash(
     std::vector<Proxy> &nodes,
     YAML::Node &yamlnode,
@@ -83,14 +29,9 @@ void proxyToClash(
     bool clashR,
     extra_settings &ext)
 {
-    const char *group_key = ext.clash_new_field_name ? "proxy-groups" : "Proxy Group";
-    YAML::Node preserved_groups = cloneSequence(yamlnode[group_key]);
-
+    // The implementation constructs, validates and writes the final groups.
+    // Do not merge another copy after the chain check.
     proxyToClashLegacy(nodes, yamlnode, extra_proxy_group, clashR, ext);
-
-    if(ext.nodelist)
-        return;
-    mergeGeneratedGroups(yamlnode, preserved_groups, ext.clash_new_field_name);
 }
 
 std::string proxyToClash(
@@ -117,6 +58,7 @@ std::string proxyToClash(
     }
 
     proxyToClash(nodes, yamlnode, extra_proxy_group, clashR, ext);
+    if(ext.chain_conversion_failed) return "";
 
     if(ext.nodelist)
         return YAML::Dump(yamlnode);
