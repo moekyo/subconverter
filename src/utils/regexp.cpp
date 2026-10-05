@@ -149,6 +149,16 @@ bool regFind(const std::string &src, const std::string &match)
     return reg.match(src, "g");
 }
 
+int regFindChecked(const std::string &src, const std::string &match)
+{
+    jp::Regex reg;
+    reg.setPattern(match).addModifier("m").addPcre2Option(PCRE2_UTF|PCRE2_ALT_BSUX).compile();
+    if(!reg) return -1;
+    jp::RegexMatch matcher;
+    const auto count=matcher.setRegexObject(&reg).setSubject(src).setModifier("g").match();
+    return matcher.getErrorNumber()!=0?-1:count?1:0;
+}
+
 std::string regReplace(const std::string &src, const std::string &match, const std::string &rep, bool global, bool multiline)
 {
     jp::Regex reg;

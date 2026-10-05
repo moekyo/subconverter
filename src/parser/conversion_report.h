@@ -7,6 +7,7 @@
 #include <yaml-cpp/yaml.h>
 
 struct SourceNodeIdentity;
+struct Proxy;
 // Only allocated for explicitly negotiated reports. Raw fields live for one
 // request and are never serialized in diagnostic records or retained in caches.
 struct ConversionInputNode
@@ -45,6 +46,14 @@ struct ConversionReport
     void bindClashNode(size_t index, const std::shared_ptr<SourceNodeIdentity> &identity);
     void bindUriNode(const std::string &token, const std::shared_ptr<SourceNodeIdentity> &identity);
     void emitted(const SourceNodeIdentity *identity, const std::string &name);
+    void configureFilters(const std::vector<std::string> &include, const std::vector<std::string> &exclude);
+    void configuredFilter(const Proxy &node, const std::vector<std::string> &include,
+                          const std::vector<std::string> &exclude, bool dropped);
     std::string finish(const std::string &target, const std::string &output, int &status);
+private:
+    bool filters_configured = false;
+    std::vector<std::string> include_filters, exclude_filters;
+    struct FilterDecision {std::string kind; size_t ordinal;};
+    std::map<const SourceNodeIdentity *, FilterDecision> filtered_nodes;
 };
 #endif

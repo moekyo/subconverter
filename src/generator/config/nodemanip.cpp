@@ -309,7 +309,10 @@ void filterNodes(std::vector<Proxy> &nodes, string_array &exclude_remarks, strin
     auto iter = nodes.begin();
     while(iter != nodes.end())
     {
-        if(chkIgnore(*iter, exclude_remarks, include_remarks))
+        const bool ignored=chkIgnore(*iter,exclude_remarks,include_remarks);
+        if(iter->SourceRegistryRef&&iter->SourceRegistryRef->Report)
+            iter->SourceRegistryRef->Report->configuredFilter(*iter,include_remarks,exclude_remarks,ignored);
+        if(ignored)
         {
             writeLog(LOG_TYPE_INFO, "Node  " + iter->Group + " - " + iter->Remark + "  has been ignored and will not be added.");
             markSourceFiltered(*iter);

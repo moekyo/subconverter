@@ -1,3 +1,7 @@
+> Historical v1 notes. The current candidate negotiates explicit v2; see
+> [the v2 policy, compatibility and verification contract](conversion-completeness-v2.md).
+> Earlier test/performance observations below describe their original revisions.
+
 # Conversion completeness check v1 candidate
 
 The user-facing name is **转换完整性检查** (English: **Conversion completeness check**).

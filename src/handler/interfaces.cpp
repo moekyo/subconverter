@@ -632,6 +632,9 @@ static std::string subconverterImpl(Request &request, Response &response, const 
         }
     }
 
+    if(ext.source_registry&&ext.source_registry->Report)
+        ext.source_registry->Report->configureFilters(lIncludeRemarks,lExcludeRemarks);
+
     /// initialize script runtime
     if(authorized && !global.scriptCleanContext)
     {
@@ -736,6 +739,8 @@ static std::string subconverterImpl(Request &request, Response &response, const 
         filterScript = argFilterScript;
     if(!filterScript.empty())
     {
+        if(ext.source_registry&&ext.source_registry->Report)
+            ext.source_registry->Report->request_failure="FILTER_UNVERIFIED";
         if(startsWith(filterScript, "path:"))
             filterScript = fileGet(filterScript.substr(5), false);
         /*
@@ -1030,7 +1035,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     auto registry = std::make_shared<SourceNodeRegistry>();
     registry->Report = std::make_shared<ConversionReport>(nonce);
     std::string output;
-    if(version != "1" || nonce.size() != 32 || !std::all_of(nonce.begin(), nonce.end(), [](char c) {
+    if(version != "2" || nonce.size() != 32 || !std::all_of(nonce.begin(), nonce.end(), [](char c) {
         return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
     }) || !getUrlArg(request.argument, "upload").empty() || request.method == "HEAD")
     {

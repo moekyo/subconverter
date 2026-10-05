@@ -4,6 +4,7 @@
 #include "utils/base64/base64.h"
 #include "utils/sha256.h"
 #include "utils/string.h"
+#include "utils/regexp.h"
 #include "utils/yaml_strings.h"
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -435,6 +436,51 @@ void ConversionReport::bindUriNode(const std::string &token,const std::shared_pt
     {node.identity=identity.get();return;}
     request_failure="IDENTITY_AMBIGUOUS";
 }
+void ConversionReport::configureFilters(const std::vector<std::string> &include,const std::vector<std::string> &exclude)
+{
+    if(filters_configured) {request_failure="FILTER_UNVERIFIED";return;}
+    filters_configured=true;
+    size_t total=0;
+    for(const auto *rules:{&include,&exclude})
+    {
+        if(rules->size()>256) {request_failure="LIMIT_EXCEEDED";return;}
+        for(const auto &rule:*rules)
+        {
+            total+=rule.size();
+            if(rule.empty()||rule.size()>4096||total>65536||rule.compare(0,2,"!!")==0||!regValid(rule)) {request_failure="FILTER_UNVERIFIED";return;}
+        }
+    }
+    include_filters=include;exclude_filters=exclude;
+}
+void ConversionReport::configuredFilter(const Proxy &node,const std::vector<std::string> &include,
+    const std::vector<std::string> &exclude,bool dropped)
+{
+    const auto identity=node.SourceIdentity.get();
+    if(!filters_configured||include!=include_filters||exclude!=exclude_filters||!identity||
+       identity->Status!=SourceNodeIdentity::State::Parsed)
+    {request_failure="FILTER_UNVERIFIED";return;}
+    std::string kind;size_t ordinal=0;
+    for(;ordinal<exclude.size();++ordinal)
+    {
+        const int matched=regFindChecked(node.Remark,exclude[ordinal]);
+        if(matched<0) {request_failure="FILTER_UNVERIFIED";return;}
+        if(matched) {kind="exclude";break;}
+    }
+    if(kind.empty()&&!include.empty())
+    {
+        bool included=false;
+        for(const auto &rule:include)
+        {
+            const int matched=regFindChecked(node.Remark,rule);
+            if(matched<0) {request_failure="FILTER_UNVERIFIED";return;}
+            if(matched) {included=true;break;}
+        }
+        if(!included) kind="include";
+    }
+    if(dropped!=!kind.empty()) {request_failure="FILTER_UNVERIFIED";return;}
+    if(dropped&&!filtered_nodes.emplace(identity,FilterDecision{kind,ordinal}).second)
+        request_failure="FILTER_UNVERIFIED";
+}
 std::string ConversionReport::finish(const std::string &target,const std::string &output,int &status)
 {
     const int upstream_status=status;
@@ -490,6 +536,28 @@ std::string ConversionReport::finish(const std::string &target,const std::string
                     else if(found->second.size()!=1||!used.insert(found->second[0]).second) result.reason="IDENTITY_AMBIGUOUS";
                     else {result.emitted=true;result.output=found->second[0];actual.reset(output_nodes[result.output]);}
                 }
+            }
+            if(result.reason=="NODE_FILTERED"&&filtered_nodes.count(input.identity))
+            {
+                // A generic Filtered flag is insufficient. Only filterNodes can
+                // attach a decision from this exact effective rule policy.
+                const auto &decision=filtered_nodes.at(input.identity);
+                int64_t port=0;
+                const auto port_value=lookup(input.input,"port");
+                bool valid=port_value.IsScalar()&&YAML::convert<int64_t>::decode(port_value,port)&&port>0&&port<=65535;
+                if(!valid) result.reason="MALFORMED_INPUT";
+                for(const auto &field:input.input) if(!nodeKeys.count(field.first.Scalar()))
+                {valid=false;result.reason="UNKNOWN_FIELD";break;}
+                if(valid&&!emitted_names.count(input.identity))
+                {
+                    result.status="FILTERED";
+                    result.reason=decision.kind=="exclude"?"CONFIG_EXCLUDE_MATCH":"CONFIG_INCLUDE_MISS";
+                    result.fields.clear();
+                    inventoryFields(!input.uri_token.empty()?input.original:input.input,{},result.fields,"FILTERED",result.reason);
+                    results[s].push_back(std::move(result));
+                    continue;
+                }
+                result.fields.clear();
             }
             auto expected=YAML::Clone(input.input);
             std::map<std::vector<size_t>,std::string> mapped_fields;
@@ -553,10 +621,22 @@ std::string ConversionReport::finish(const std::string &target,const std::string
     if(!pass) status=422;
     rapidjson::StringBuffer buffer;Writer w(buffer);
     static const std::set<std::string> public_targets={"auto","clash","clashr","surge","surfboard","quan","quanx","loon","mellow","singbox","ss","ssd","ssr","sssub","v2ray","trojan","mixed"};
-    w.StartObject();text(w,"schema","subconverter.completeness/v1");text(w,"nonce",nonce);text(w,"target",public_targets.count(target)?target:"unknown");
+    w.StartObject();text(w,"schema","subconverter.completeness/v2");text(w,"nonce",nonce);text(w,"target",public_targets.count(target)?target:"unknown");
     w.Key("upstream_status");w.Int(upstream_status);
     text(w,"output",pass?output:"");text(w,"output_sha256",sha256(pass?output:""));
     w.Key("report");w.StartObject();text(w,"status",pass?"PASS":"FAIL");text(w,"reason",pass?"EXACT":failure.empty()?"CONVERSION_FAILED":failure);
+    w.Key("filter_policy");w.StartObject();text(w,"engine","subconverter.regex/v1");
+    for(const auto &kind:{std::string("include"),std::string("exclude")})
+    {
+        w.Key(kind.c_str());w.StartArray();
+        for(const auto &rule:kind=="include"?include_filters:exclude_filters)
+        {
+            const auto witness=sha256(nonce+std::string("\0filter\0",8)+kind+std::string("\0",1)+rule);
+            w.String(witness.c_str(),witness.size());
+        }
+        w.EndArray();
+    }
+    w.EndObject();
     w.Key("sources");w.StartArray();
     for(size_t s=0;s<sources.size();++s)
     {
@@ -568,6 +648,15 @@ std::string ConversionReport::finish(const std::string &target,const std::string
         for(size_t n=0;n<results[s].size();++n)
         {
             const auto &result=results[s][n];w.StartObject();number(w,"ordinal",n);text(w,"status",result.status);text(w,"reason",result.reason);
+            w.Key("filter");
+            if(result.status=="FILTERED")
+            {
+                const auto &decision=filtered_nodes.at(result.input->identity);
+                w.StartObject();text(w,"kind",decision.kind);w.Key("rule_ordinal");
+                if(decision.kind=="exclude") w.Uint64(decision.ordinal);else w.Null();
+                w.EndObject();
+            }
+            else w.Null();
             w.Key("output_ordinal");if(result.emitted) w.Uint64(result.output);else w.Null();
             w.Key("fields");w.StartArray();
             for(const auto &field:result.fields)

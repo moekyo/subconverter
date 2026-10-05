@@ -5,6 +5,9 @@
 
 bool regValid(const std::string &reg);
 bool regFind(const std::string &src, const std::string &match);
+// Same engine/options as regFind; -1 is an error, 0 a definite miss, 1 a match.
+// Strict completeness must never reinterpret match-limit/UTF errors as misses.
+int regFindChecked(const std::string &src, const std::string &match);
 std::string regReplace(const std::string &src, const std::string &match, const std::string &rep, bool global = true, bool multiline = true);
 bool regMatch(const std::string &src, const std::string &match);
 int regGetMatch(const std::string &src, const std::string &match, size_t group_count, ...);
