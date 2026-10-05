@@ -35,7 +35,6 @@ const std::set<std::string> mapKeys={"ws-opts","ws-headers","grpc-opts","h2-opts
 const std::set<std::string> listKeys={"alpn","dns","reserved"};
 void text(Writer &w, const char *key, const std::string &value) { w.Key(key); w.String(value.data(), value.size()); }
 void number(Writer &w,const char *key,size_t n) {w.Key(key);w.Uint64(n);}
-bool sameScalar(const YAML::Node &a,const YAML::Node &b) {return a.IsScalar()&&b.IsScalar()&&a.Scalar()==b.Scalar();}
 std::string kind(const YAML::Node &n)
 {
     if(!n.IsDefined()) return "absent";
@@ -44,15 +43,56 @@ std::string kind(const YAML::Node &n)
     if(n.IsSequence()) return "array";
     const auto tag=n.Tag(), s=n.Scalar();
     if(tag=="!"||tag=="tag:yaml.org,2002:str"||tag=="str") return "string";
+    // Explicit types take precedence over an implicitly decodable spelling.
+    // In particular, !!float +443 must not become an integer equivalence.
+    if(tag=="tag:yaml.org,2002:bool") return "boolean";
+    if(tag=="tag:yaml.org,2002:int") return "integer";
+    if(tag=="tag:yaml.org,2002:float") return "number";
+    if(!tag.empty()&&tag!="?") return "unknown-tag";
     bool boolean=false;int64_t integer=0;uint64_t unsigned_integer=0;double number=0;
-    if(tag=="tag:yaml.org,2002:bool"||YAML::convert<bool>::decode(n,boolean)) return "boolean";
-    if(tag=="tag:yaml.org,2002:int"||YAML::convert<int64_t>::decode(n,integer)||YAML::convert<uint64_t>::decode(n,unsigned_integer)) return "integer";
-    if(tag=="tag:yaml.org,2002:float"||YAML::convert<double>::decode(n,number)||yamlFloatLexical(s)) return "number";
+    if(YAML::convert<bool>::decode(n,boolean)) return "boolean";
+    if(YAML::convert<int64_t>::decode(n,integer)||YAML::convert<uint64_t>::decode(n,unsigned_integer)) return "integer";
+    if(YAML::convert<double>::decode(n,number)||yamlFloatLexical(s)) return "number";
     if(!s.empty()&&std::string("+-0123456789.").find(s.front())!=std::string::npos)
     {char *end=nullptr;std::strtod(s.c_str(),&end);if(end==s.c_str()+s.size()&&end!=s.c_str())return "number";}
-    if(!tag.empty()&&tag!="?") return "unknown-tag";
     if(s.size()>=10&&s[4]=='-'&&s[7]=='-'&&(s.size()==10||s[10]=='T'||s[10]=='t'||s[10]==' '))return "timestamp";
     return "string";
+}
+bool sameScalar(const YAML::Node &a,const YAML::Node &b)
+{
+    if(!a.IsScalar()||!b.IsScalar())return false;
+    const auto type=kind(a);
+    if(type!=kind(b))return false;
+    if(type=="boolean")
+    {
+        // yaml-cpp also accepts YAML 1.1 y/yes/on spellings. Do not expand
+        // completeness to those forms: the guarded consumer uses core bools.
+        const auto core_bool=[](const std::string &s)
+        {return s=="true"||s=="True"||s=="TRUE"||s=="false"||s=="False"||s=="FALSE";};
+        if(!core_bool(a.Scalar())||!core_bool(b.Scalar()))return false;
+        bool left=false,right=false;
+        return YAML::convert<bool>::decode(a,left)&&YAML::convert<bool>::decode(b,right)&&left==right;
+    }
+    if(type=="integer")
+    {
+        const auto decimal=[](const std::string &s)
+        {
+            const size_t first=!s.empty()&&(s.front()=='+'||s.front()=='-')?1:0;
+            return first<s.size()&&(s[first]!='0'||first+1==s.size())&&
+                std::all_of(s.begin()+first,s.end(),[](unsigned char c){return c>='0'&&c<='9';});
+        };
+        if(!decimal(a.Scalar())||!decimal(b.Scalar()))return false;
+        int64_t left=0,right=0;
+        if(YAML::convert<int64_t>::decode(a,left)&&YAML::convert<int64_t>::decode(b,right))return left==right;
+        // Do not reinterpret a negative value as an unsigned integer or use
+        // floating point, which would lose precision above 2^53.
+        if(a.Scalar().find('-')!=std::string::npos||b.Scalar().find('-')!=std::string::npos)return false;
+        uint64_t unsigned_left=0,unsigned_right=0;
+        return YAML::convert<uint64_t>::decode(a,unsigned_left)&&YAML::convert<uint64_t>::decode(b,unsigned_right)&&unsigned_left==unsigned_right;
+    }
+    // Credentials, strings and explicit REALITY representation maps retain
+    // their literal spelling. Other scalar types receive no normalization.
+    return a.Scalar()==b.Scalar();
 }
 bool stringList(const YAML::Node &value)
 {
@@ -217,26 +257,28 @@ YAML::Node projectedInput(const YAML::Node &input,const YAML::Node &output,bool 
     }
     return YAML::Clone(input);
 }
-bool defaultValue(const std::string &protocol,const std::vector<std::string> &path,const YAML::Node &actual)
+bool defaultValue(const std::string &protocol,const std::string &plugin,const std::vector<std::string> &path,const YAML::Node &actual)
 {
     if(path.size()==1)
     {
         const auto &key=path[0];
-        if((protocol=="vmess"||protocol=="vless"||protocol=="http")&&key=="tls"&&kind(actual)=="boolean"&&actual.Scalar()=="false")return true;
-        if(protocol=="vmess"&&key=="alterId"&&kind(actual)=="integer"&&actual.Scalar()=="0")return true;
+        if((protocol=="vmess"||protocol=="vless"||protocol=="http")&&key=="tls"&&sameScalar(actual,YAML::Node(false)))return true;
+        if(protocol=="vmess"&&key=="alterId"&&sameScalar(actual,YAML::Node(0)))return true;
         if(protocol=="vmess"&&key=="cipher"&&kind(actual)=="string"&&actual.Scalar()=="auto")return true;
         if(protocol=="vless"&&key=="network"&&kind(actual)=="string"&&actual.Scalar()=="tcp")return true;
         if(protocol=="ssr"&&(key=="protocol-param"||key=="protocolparam"||key=="obfs-param"||key=="obfsparam")&&kind(actual)=="string"&&actual.Scalar().empty())return true;
     }
-    if(protocol=="ss"&&path.size()==2&&path[0]=="plugin-opts")
+    if(protocol=="ss"&&plugin=="v2ray-plugin"&&path.size()==2&&path[0]=="plugin-opts")
     {
-        if((path[1]=="tls"||path[1]=="mux")&&kind(actual)=="boolean"&&actual.Scalar()=="false")return true;
-        if((path[1]=="host"||path[1]=="path")&&kind(actual)=="string"&&actual.Scalar().empty())return true;
+        if(path[1]=="tls"&&sameScalar(actual,YAML::Node(false)))return true;
+        if(path[1]=="mux"&&sameScalar(actual,YAML::Node(true)))return true;
+        if(path[1]=="host"&&kind(actual)=="string"&&actual.Scalar()=="bing.com")return true;
+        if(path[1]=="path"&&kind(actual)=="string"&&actual.Scalar().empty())return true;
     }
     return false;
 }
 void outputFields(const YAML::Node &actual,const YAML::Node &expected,std::vector<size_t> ordinal,std::vector<std::string> path,
-                  const std::string &protocol,const std::map<std::string,YAML::Node> &configured,std::vector<Field> &fields)
+                  const std::string &protocol,const std::string &plugin,const std::map<std::string,YAML::Node> &configured,std::vector<Field> &fields)
 {
     std::string disposition="PRESERVED",reason="EXACT";
     if(!expected.IsDefined())
@@ -248,7 +290,7 @@ void outputFields(const YAML::Node &actual,const YAML::Node &expected,std::vecto
             configured_default=kind(value)==kind(actual)&&sameScalar(value,actual);
         }
         if(configured_default){disposition="MAPPED";reason="CONFIG_DEFAULT";}
-        else if(defaultValue(protocol,path,actual)){disposition="MAPPED";reason="GENERATED_DEFAULT";}
+        else if(defaultValue(protocol,plugin,path,actual)){disposition="MAPPED";reason="GENERATED_DEFAULT";}
         else {disposition="REJECTED";reason="OUTPUT_FIELD_UNEXPECTED";}
     }
     else if(kind(actual)!=kind(expected)) {disposition="REJECTED";reason="FIELD_TYPE_CHANGED";}
@@ -261,13 +303,13 @@ void outputFields(const YAML::Node &actual,const YAML::Node &expected,std::vecto
         for(const auto &entry:actual)
         {
             auto next_ordinal=ordinal;next_ordinal.push_back(index++);auto next_path=path;next_path.push_back(entry.first.Scalar());
-            outputFields(entry.second,lookup(expected,entry.first.Scalar()),next_ordinal,next_path,protocol,configured,fields);
+            outputFields(entry.second,lookup(expected,entry.first.Scalar()),next_ordinal,next_path,protocol,plugin,configured,fields);
         }
     }
     else if(actual.IsSequence())for(size_t i=0;i<actual.size();++i)
     {
         auto next_ordinal=ordinal;next_ordinal.push_back(i);auto next_path=path;next_path.push_back(std::to_string(i));
-        outputFields(actual[i],expected.IsSequence()&&i<expected.size()?expected[i]:YAML::Node(YAML::NodeType::Undefined),next_ordinal,next_path,protocol,configured,fields);
+        outputFields(actual[i],expected.IsSequence()&&i<expected.size()?expected[i]:YAML::Node(YAML::NodeType::Undefined),next_ordinal,next_path,protocol,plugin,configured,fields);
     }
 }
 }
@@ -490,7 +532,8 @@ std::string ConversionReport::finish(const std::string &target,const std::string
             if(result.emitted)
             {
                 const auto type=lookup(expected,"type");
-                outputFields(actual,projectedInput(expected,actual),{},{},type.IsScalar()?type.Scalar():"",configured_defaults,result.output_fields);
+                const auto plugin=lookup(expected,"plugin");
+                outputFields(actual,projectedInput(expected,actual),{},{},type.IsScalar()?type.Scalar():"",plugin.IsScalar()?plugin.Scalar():"",configured_defaults,result.output_fields);
                 for(const auto &field:result.output_fields)if(field.disposition=="REJECTED") {result.reason=field.reason;result.status="FAIL";break;}
             }
             if(!input.uri_token.empty())

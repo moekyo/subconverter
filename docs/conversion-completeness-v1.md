@@ -64,11 +64,20 @@ IDs retain their exact digit spelling through an explicit representation map.
 SIP003 plugin options use escaped semicolon/equal/backslash parsing. Values
 such as `host=tls.example`, `path=/mux`, or `path=/x?foo=1&tls` cannot turn on
 TLS or mux merely by containing those words. Standard ampersands stay inside
-values. Explicit native true/false/absence survive the internal representation.
+values. Native v2ray-plugin options use the pinned Mihomo defaults only when
+absent: `mux: true` and `host: bing.com`. Explicit false and empty host remain
+unchanged. These are native Clash defaults, not raw SIP003 defaults; see
+[Mihomo v1.19.29](https://github.com/MetaCubeX/mihomo/blob/v1.19.29/adapter/outbound/shadowsocks.go#L332-L346).
 Raw SIP003 TLS uses key-presence semantics and mux uses integer semantics;
 conflicting duplicate options fail. The narrow legacy mode-first ampersand
 syntax remains compatible and does not receive an unsupported strict claim.
 Clash and QuanX consume the same parsed options.
+
+Both field inventories compare core boolean and decimal integer values after matching
+their types. Equivalent spellings such as `TRUE`/`true` or `+443`/`443` are
+accepted without floating-point conversion. Strings, credentials and REALITY
+short-ID spelling retain their exact-value requirements. Invalid types,
+changed values and integer overflow cannot use this equivalence.
 
 ## Private service boundary and rollout
 

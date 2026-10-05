@@ -88,7 +88,60 @@ class Completeness(unittest.TestCase):
                 n=node('ss',password='p',cipher='aes-128-gcm',plugin='v2ray-plugin',**{'plugin-opts':opts})
                 r=convert({'proxies':[n]});self.assertEqual(r['report']['status'],'PASS')
                 actual=yaml.safe_load(r['output'])['proxies'][0]['plugin-opts']
-                self.assertEqual(actual,{**opts,'tls':tls is True,'mux':mux is True})
+                self.assertEqual(actual,{**opts,'tls':tls is True,'mux':mux is not False})
+
+    def test_native_plugin_defaults_are_mihomo_defaults(self):
+        # Independent oracle: Mihomo v1.19.29 NewShadowSocks initializes
+        # v2rayObfsOption{Host: "bing.com", Mux: true} before decoding input.
+        for host in (None,'','front.example'):
+            for mux in (None,False,True):
+                with self.subTest(host=host,mux=mux):
+                    opts={'mode':'websocket','path':'/'}
+                    if host is not None:opts['host']=host
+                    if mux is not None:opts['mux']=mux
+                    n=node('ss',password='synthetic',cipher='aes-128-gcm',plugin='v2ray-plugin',**{'plugin-opts':opts})
+                    r=convert({'proxies':[n]});self.assertEqual(r['report']['status'],'PASS')
+                    actual=yaml.safe_load(r['output'])['proxies'][0]
+                    self.assertEqual(actual,{**n,'plugin-opts':{**opts,'host':'bing.com' if host is None else host,'tls':False,'mux':mux is not False}})
+                    record=r['report']['sources'][0]['input_nodes'][0]
+                    output_fields={tuple(f['path']):f for f in record['output_fields']}
+                    plugin_index=list(actual).index('plugin-opts')
+                    for key in ('host','mux'):
+                        path=(plugin_index,list(actual['plugin-opts']).index(key))
+                        self.assertEqual(output_fields[path]['reason'],'GENERATED_DEFAULT' if key not in opts else 'EXACT')
+
+    def test_scalar_boolean_spellings_preserve_typed_values(self):
+        for spelling,value in (('true',True),('True',True),('TRUE',True),('!!bool TRUE',True),('false',False),('False',False),('FALSE',False),('!!bool FALSE',False)):
+            raw='proxies:\n- {name: fixture, type: ss, server: 192.0.2.10, port: 443, cipher: aes-128-gcm, password: synthetic, plugin: v2ray-plugin, plugin-opts: {mode: websocket, host: origin.invalid, path: /, tls: '+spelling+', mux: '+spelling+'}}\n'
+            with self.subTest(spelling=spelling):
+                r=convert(raw);self.assertEqual(r['report']['status'],'PASS')
+                opts=yaml.safe_load(r['output'])['proxies'][0]['plugin-opts']
+                self.assertIs(opts['tls'],value);self.assertIs(opts['mux'],value)
+                record=r['report']['sources'][0]['input_nodes'][0]
+                self.assertFalse(any(f['disposition']=='REJECTED' for key in ('fields','output_fields') for f in record[key]))
+
+    def test_scalar_integer_spellings_preserve_typed_values(self):
+        for spelling,expected in (('443',443),('+443',443),('!!int +443',443),('1080',1080),('+1080',1080)):
+            raw='proxies:\n- {name: fixture, type: socks5, server: 192.0.2.10, port: '+spelling+'}\n'
+            with self.subTest(spelling=spelling):
+                r=convert(raw);self.assertEqual(r['report']['status'],'PASS')
+                self.assertEqual(yaml.safe_load(r['output'])['proxies'][0]['port'],expected)
+                record=r['report']['sources'][0]['input_nodes'][0]
+                self.assertFalse(any(f['disposition']=='REJECTED' for key in ('fields','output_fields') for f in record[key]))
+
+    def test_scalar_equivalence_does_not_relax_types_or_overflow(self):
+        for spelling in ('"443"','443.0','4.43e2','0443','+0443','0x1bb','!!int 0x1bb','!!float +443','!!float 443','!!bool 443','!!int TRUE','!!null +443','!!map +443','!!seq +443','true','-1','65537','18446744073709551615','!!int 18446744073709551616','!!int -18446744073709551615'):
+            raw='proxies:\n- {name: fixture, type: socks5, server: 192.0.2.10, port: '+spelling+'}\n'
+            with self.subTest(spelling=spelling):
+                r=convert(raw);self.assertEqual(r['report']['status'],'FAIL');self.assertEqual(r['output'],'')
+        for spelling in ('"TRUE"','tRuE','1','yes','YES','y','on','off','no','!!bool yes','!!int TRUE','!!float TRUE','!!null TRUE','!!map TRUE','!!seq TRUE','!!bool invalid'):
+            raw='proxies:\n- {name: fixture, type: ss, server: 192.0.2.10, port: 443, cipher: aes-128-gcm, password: synthetic, plugin: v2ray-plugin, plugin-opts: {mode: websocket, tls: '+spelling+'}}\n'
+            with self.subTest(spelling=spelling):
+                r=convert(raw);self.assertEqual(r['report']['status'],'FAIL');self.assertEqual(r['output'],'')
+        for literal in ('+443','443','TRUE','true','00001234'):
+            n=node(username=literal,password=literal)
+            r=convert({'proxies':[n]});self.assertEqual(r['report']['status'],'PASS')
+            self.assertEqual(yaml.safe_load(r['output'])['proxies'],[n])
 
     def test_uri_original_components_and_output_inventory(self):
         uri='anytls://p%40ss@[2001:db8::1]:443?sni=tls.invalid&peer=tls.invalid&udp=0#Any'

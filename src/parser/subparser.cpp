@@ -1436,13 +1436,20 @@ void explodeClash(Node yamlnode, std::vector<Proxy> &nodes, const SourceRegistry
                     break;
                 case "v2ray-plugin"_hash:
                     plugin = "v2ray-plugin";
+                    // Native Clash defaults differ from raw SIP003 options.
+                    // Preserve explicit empty/false values; only absence uses
+                    // Mihomo's v2ray-plugin defaults (Host=bing.com, Mux=true).
+                    pluginopts_host = "bing.com";
+                    pluginopts_mux = "mux;";
                     if(singleproxy["plugin-opts"].IsDefined())
                     {
                         singleproxy["plugin-opts"]["mode"] >>= pluginopts_mode;
-                        singleproxy["plugin-opts"]["host"] >>= pluginopts_host;
+                        if(singleproxy["plugin-opts"]["host"].IsDefined())
+                            singleproxy["plugin-opts"]["host"] >>= pluginopts_host;
                         tls = safe_as<bool>(singleproxy["plugin-opts"]["tls"]) ? "tls;" : "";
                         singleproxy["plugin-opts"]["path"] >>= path;
-                        pluginopts_mux = safe_as<bool>(singleproxy["plugin-opts"]["mux"]) ? "mux;" : "";
+                        if(singleproxy["plugin-opts"]["mux"].IsDefined())
+                            pluginopts_mux = safe_as<bool>(singleproxy["plugin-opts"]["mux"]) ? "mux;" : "";
                     }
                     break;
                 default:
